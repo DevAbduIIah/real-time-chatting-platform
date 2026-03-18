@@ -357,10 +357,6 @@ npx prisma migrate reset
 npx prisma generate
 ```
 
-## 📄 License
-
-This project is open source and available under the [MIT License](LICENSE).
-
 ## 👤 Author
 
 Built as a learning project to demonstrate modern web development practices with real-time features.
