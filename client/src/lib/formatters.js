@@ -1,3 +1,14 @@
+function formatRuntimeTime(date) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(date);
+}
+
+function formatRuntimeDate(date, options) {
+  return new Intl.DateTimeFormat(undefined, options).format(date);
+}
+
 export function formatConversationTime(dateString) {
   if (!dateString) return '';
 
@@ -6,7 +17,7 @@ export function formatConversationTime(dateString) {
   const diffDays = Math.floor((now - date) / (1000 * 60 * 60 * 24));
 
   if (diffDays === 0) {
-    return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    return formatRuntimeTime(date);
   }
 
   if (diffDays === 1) {
@@ -14,19 +25,16 @@ export function formatConversationTime(dateString) {
   }
 
   if (diffDays < 7) {
-    return date.toLocaleDateString('en-US', { weekday: 'short' });
+    return formatRuntimeDate(date, { weekday: 'short' });
   }
 
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return formatRuntimeDate(date, { month: 'short', day: 'numeric' });
 }
 
 export function formatMessageTime(dateString) {
   if (!dateString) return '';
 
-  return new Date(dateString).toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  return formatRuntimeTime(new Date(dateString));
 }
 
 export function formatMessageDateLabel(dateString) {
@@ -46,7 +54,7 @@ export function formatMessageDateLabel(dateString) {
     return 'Yesterday';
   }
 
-  return date.toLocaleDateString('en-US', {
+  return formatRuntimeDate(date, {
     month: 'short',
     day: 'numeric',
     year: date.getFullYear() !== today.getFullYear() ? 'numeric' : undefined,
@@ -63,10 +71,7 @@ export function formatLastSeen(dateString) {
   const yesterday = new Date();
   yesterday.setDate(today.getDate() - 1);
 
-  const time = date.toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  const time = formatRuntimeTime(date);
 
   if (date.toDateString() === today.toDateString()) {
     return `Last seen today at ${time}`;
@@ -76,7 +81,7 @@ export function formatLastSeen(dateString) {
     return `Last seen yesterday at ${time}`;
   }
 
-  return `Last seen ${date.toLocaleDateString('en-US', {
+  return `Last seen ${formatRuntimeDate(date, {
     month: 'short',
     day: 'numeric',
   })} at ${time}`;

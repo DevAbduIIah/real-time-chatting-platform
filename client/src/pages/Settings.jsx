@@ -221,9 +221,6 @@ function Settings() {
                   <p className="truncate text-sm theme-muted">{statusText || 'Add a short status message'}</p>
                 </div>
               </div>
-              <p className="mt-4 text-sm leading-6 theme-muted">
-                Your avatar, display name, and status will appear throughout the app so the experience feels more personal and portfolio-ready.
-              </p>
             </section>
 
             <section className="rounded-[1.75rem] border p-6 shadow-sm theme-border theme-surface">
