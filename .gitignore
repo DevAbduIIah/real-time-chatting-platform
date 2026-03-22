@@ -31,7 +31,6 @@ client/.env
 *.sqlite3
 server/prisma/*.db
 server/prisma/*.db-journal
-server/prisma/migrations/
 
 # Logs
 logs/
@@ -113,6 +112,11 @@ client/.vite/
 
 # Local development
 *.local
+server/uploads/*
+!server/uploads/.gitkeep
+!server/uploads/avatars/
+server/uploads/avatars/*
+!server/uploads/avatars/.gitkeep
 
 # Vercel
 .vercel

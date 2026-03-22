@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useState, useEffect } from 'react';
 import { api } from '../lib/api';
 
@@ -21,7 +22,7 @@ export function AuthProvider({ children }) {
     try {
       const data = await api.auth.me();
       setUser(data.user);
-    } catch (err) {
+    } catch {
       localStorage.removeItem('token');
     } finally {
       setLoading(false);
@@ -48,7 +49,7 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, refreshUser: checkAuth, updateUser: setUser }}>
       {children}
     </AuthContext.Provider>
   );

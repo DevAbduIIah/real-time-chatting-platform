@@ -1,5 +1,6 @@
 const express = require('express');
 const { createServer } = require('http');
+const path = require('path');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
@@ -21,8 +22,11 @@ const io = new Server(httpServer, {
 
 const PORT = process.env.PORT || 5000;
 
+app.set('io', io);
+
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Routes
 app.use('/api/auth', authRoutes);

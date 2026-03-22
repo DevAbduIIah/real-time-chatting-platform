@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const prisma = require('../lib/prisma');
 const auth = require('../middleware/auth');
+const { publicUserSelect } = require('./user-helpers');
 
 const router = express.Router();
 
@@ -49,11 +50,10 @@ router.post('/register', async (req, res) => {
     );
 
     res.status(201).json({
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-      },
+      user: await prisma.user.findUnique({
+        where: { id: user.id },
+        select: publicUserSelect,
+      }),
       token,
     });
   } catch (err) {
@@ -96,11 +96,10 @@ router.post('/login', async (req, res) => {
     );
 
     res.json({
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-      },
+      user: await prisma.user.findUnique({
+        where: { id: user.id },
+        select: publicUserSelect,
+      }),
       token,
     });
   } catch (err) {
@@ -114,12 +113,7 @@ router.get('/me', auth, async (req, res) => {
   try {
     const user = await prisma.user.findUnique({
       where: { id: req.user.id },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        createdAt: true,
-      },
+      select: publicUserSelect,
     });
 
     if (!user) {
