@@ -170,20 +170,20 @@ Introduce more advanced chat functionality.
 
 ### Tasks
 
-- Add **group conversation model**
+- [x] Add **group conversation model**
 - Allow users to:
-  - Create a group
-  - Name a group
-  - Add/remove participants
-- Show group details in chat header
-- Update sidebar to support both direct and group chats
-- Adjust socket events and API logic for group messaging
-- Show sender identity clearly in group messages
+  - [x] Create a group
+  - [x] Name a group
+  - [x] Add/remove participants
+- [x] Show group details in chat header
+- [x] Update sidebar to support both direct and group chats
+- [x] Adjust socket events and API logic for group messaging
+- [x] Show sender identity clearly in group messages
 
 ### Done When
 
-- Users can create and use group chats reliably
-- UI clearly supports both one-to-one and group messaging
+- [x] Users can create and use group chats reliably
+- [x] UI clearly supports both one-to-one and group messaging
 
 ---
 

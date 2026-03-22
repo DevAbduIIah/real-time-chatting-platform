@@ -6,7 +6,7 @@ export function createClientTempId() {
   return `temp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-export function createPendingMessage({ content, conversationId, user, replyToMessage }) {
+export function createPendingMessage({ content, conversationId, user, replyToMessage, attachments = [] }) {
   const clientTempId = createClientTempId();
   const createdAt = new Date().toISOString();
 
@@ -25,6 +25,7 @@ export function createPendingMessage({ content, conversationId, user, replyToMes
     conversationId,
     isOwn: true,
     status: 'pending',
+    attachments,
     replyToMessage: replyToMessage
       ? {
           id: replyToMessage.id,

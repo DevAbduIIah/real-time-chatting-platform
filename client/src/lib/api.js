@@ -67,9 +67,14 @@ export const api = {
     updateMe: (data) => apiRequest('/users/me', { method: 'PATCH', body: JSON.stringify(data) }),
     uploadAvatar: (formData) => apiRequest('/users/me/avatar', { method: 'POST', body: formData }),
   },
+  uploads: {
+    uploadAttachment: (formData) => apiRequest('/uploads', { method: 'POST', body: formData }),
+  },
   conversations: {
     getAll: () => apiRequest('/conversations'),
     create: (userId) => apiRequest('/conversations', { method: 'POST', body: JSON.stringify({ userId }) }),
+    createGroup: (data) => apiRequest('/conversations/group', { method: 'POST', body: JSON.stringify(data) }),
+    updateGroup: (id, data) => apiRequest(`/conversations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     getMessages: (id, params = {}) =>
       apiRequest(`/conversations/${id}/messages${buildQueryString(params)}`),
     markRead: (id) => apiRequest(`/conversations/${id}/read`, { method: 'POST' }),

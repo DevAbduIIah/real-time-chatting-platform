@@ -1,17 +1,32 @@
-function getRecipientId(conversation, currentUserId) {
-  return conversation.user1Id === currentUserId
-    ? conversation.user2Id
-    : conversation.user1Id;
+const { getConversationParticipantIds } = require('./conversation-helpers');
+
+function getConversationRecipientIds(conversation, currentUserId) {
+  return getConversationParticipantIds(conversation)
+    .filter((userId) => userId !== currentUserId);
 }
 
 function getMessageInclude() {
   return {
     sender: { select: { id: true, name: true, avatarUrl: true } },
+    attachments: {
+      orderBy: { createdAt: 'asc' },
+    },
     replyToMessage: {
       include: {
         sender: { select: { id: true, name: true, avatarUrl: true } },
       },
     },
+  };
+}
+
+function formatAttachment(attachment) {
+  return {
+    id: attachment.id,
+    originalName: attachment.originalName,
+    mimeType: attachment.mimeType,
+    size: attachment.size,
+    kind: attachment.kind,
+    url: attachment.url,
   };
 }
 
@@ -47,13 +62,20 @@ function formatReceiptStatus(message, isOwn) {
 }
 
 function getMessagePreview(message, currentUserId) {
+  const attachmentCount = message.attachments?.length || 0;
+  const attachmentLabel = attachmentCount > 0
+    ? message.attachments.some((attachment) => attachment.kind === 'image')
+      ? attachmentCount > 1 ? 'sent images' : 'sent an image'
+      : attachmentCount > 1 ? 'sent files' : 'sent a file'
+    : null;
+
   return {
     id: message.id,
     content: message.deletedAt
       ? message.senderId === currentUserId
         ? 'You deleted a message'
         : 'Message deleted'
-      : message.content,
+      : message.content || attachmentLabel || '',
     createdAt: message.createdAt,
     isOwn: message.senderId === currentUserId,
   };
@@ -79,12 +101,13 @@ function formatMessage(message, currentUserId) {
     isOwn,
     status: formatReceiptStatus(message, isOwn),
     replyToMessage: formatReplyMessage(message.replyToMessage),
+    attachments: (message.attachments || []).map(formatAttachment),
   };
 }
 
 module.exports = {
   formatMessage,
+  getConversationRecipientIds,
   getMessageInclude,
   getMessagePreview,
-  getRecipientId,
 };

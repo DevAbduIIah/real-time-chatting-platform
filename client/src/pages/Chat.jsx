@@ -3,20 +3,41 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
 import { api } from '../lib/api';
-import {
-  createPendingMessage,
-  mergeMessages,
-  removeMessage,
-  updateMessageById,
-  upsertMessage,
-} from '../lib/message-utils';
+import { createPendingMessage, mergeMessages, removeMessage, updateMessageById, upsertMessage } from '../lib/message-utils';
 import Sidebar from '../components/Sidebar';
 import ChatHeader from '../components/ChatHeader';
 import MessageList from '../components/MessageList';
 import MessageInput from '../components/MessageInput';
 import EmptyState from '../components/EmptyState';
+import GroupModal from '../components/GroupModal';
 
 const MESSAGE_PAGE_SIZE = 30;
+
+function getConversationTitle(conversation) {
+  if (!conversation) return '';
+  if (conversation.type === 'group') return conversation.name || 'Untitled group';
+  return conversation.otherUser?.name || 'Conversation';
+}
+
+function getConversationSubtitle(conversation) {
+  if (conversation.lastMessage?.content) {
+    return `${conversation.lastMessage.isOwn ? 'You: ' : ''}${conversation.lastMessage.content}`;
+  }
+
+  if (conversation.type === 'group') {
+    const participantNames = (conversation.participants || [])
+      .map((participant) => participant.name)
+      .filter(Boolean)
+      .slice(0, 3)
+      .join(', ');
+
+    return participantNames
+      ? `${conversation.participantCount} members - ${participantNames}`
+      : `${conversation.participantCount} members`;
+  }
+
+  return 'No messages yet';
+}
 
 function sortConversationsByActivity(conversationList) {
   return [...conversationList].sort((a, b) => {
@@ -27,7 +48,7 @@ function sortConversationsByActivity(conversationList) {
       return bDate - aDate;
     }
 
-    return a.otherUser.name.localeCompare(b.otherUser.name);
+    return getConversationTitle(a).localeCompare(getConversationTitle(b));
   });
 }
 
@@ -36,13 +57,20 @@ function isMobileViewport() {
 }
 
 function buildConversationPreview(message, currentUserId) {
+  const attachmentCount = message.attachments?.length || 0;
+  const attachmentLabel = attachmentCount > 0
+    ? message.attachments.some((attachment) => attachment.kind === 'image')
+      ? attachmentCount > 1 ? 'Sent images' : 'Sent an image'
+      : attachmentCount > 1 ? 'Sent files' : 'Sent a file'
+    : '';
+
   return {
     id: message.id,
     content: message.deletedAt
       ? message.senderId === currentUserId
         ? 'You deleted a message'
         : 'Message deleted'
-      : message.content,
+      : message.content || attachmentLabel,
     createdAt: message.createdAt,
     isOwn: message.senderId === currentUserId,
   };
@@ -50,15 +78,8 @@ function buildConversationPreview(message, currentUserId) {
 
 function doesMessageMatchSearch(message, searchTerm) {
   const normalizedSearchTerm = searchTerm.trim().toLowerCase();
-
-  if (!normalizedSearchTerm) {
-    return true;
-  }
-
-  if (message.deletedAt) {
-    return false;
-  }
-
+  if (!normalizedSearchTerm) return true;
+  if (message.deletedAt) return false;
   return (message.content || '').toLowerCase().includes(normalizedSearchTerm);
 }
 
@@ -87,8 +108,12 @@ function Chat() {
   const [isOtherUserTyping, setIsOtherUserTyping] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [messageSearchQuery, setMessageSearchQuery] = useState('');
+  const [scrollToLatestToken, setScrollToLatestToken] = useState(0);
   const [replyToMessage, setReplyToMessage] = useState(null);
   const [editingMessageId, setEditingMessageId] = useState(null);
+  const [isCreateGroupOpen, setIsCreateGroupOpen] = useState(false);
+  const [isManageGroupOpen, setIsManageGroupOpen] = useState(false);
+  const [isGroupSubmitting, setIsGroupSubmitting] = useState(false);
   const pendingTimeoutsRef = useRef(new Map());
   const activeMessageViewRef = useRef('');
 
@@ -96,8 +121,7 @@ function Chat() {
   const normalizedMessageSearchQuery = messageSearchQuery.trim();
 
   const selectedConversation = useMemo(
-    () =>
-      conversations.find((conversation) => conversation.id === selectedConversationId) || null,
+    () => conversations.find((conversation) => conversation.id === selectedConversationId) || null,
     [conversations, selectedConversationId]
   );
 
@@ -106,9 +130,28 @@ function Chat() {
     [editingMessageId, messages]
   );
 
+  const availableGroupUsers = useMemo(
+    () => users.slice().sort((leftUser, rightUser) => leftUser.name.localeCompare(rightUser.name)),
+    [users]
+  );
+
+  const upsertConversation = useCallback((nextConversation) => {
+    setConversations((prev) => {
+      const existingIndex = prev.findIndex((conversation) => conversation.id === nextConversation.id);
+      const nextList = existingIndex === -1
+        ? [...prev, nextConversation]
+        : prev.map((conversation, index) => (index === existingIndex ? nextConversation : conversation));
+
+      return sortConversationsByActivity(nextList);
+    });
+  }, []);
+
+  const removeConversation = useCallback((conversationId) => {
+    setConversations((prev) => prev.filter((conversation) => conversation.id !== conversationId));
+  }, []);
+
   const clearPendingTimeout = useCallback((clientTempId) => {
     if (!clientTempId) return;
-
     const timeoutId = pendingTimeoutsRef.current.get(clientTempId);
     if (timeoutId) {
       clearTimeout(timeoutId);
@@ -119,11 +162,7 @@ function Chat() {
   const updateConversationSummary = useCallback((conversationId, updater) => {
     setConversations((prev) =>
       sortConversationsByActivity(
-        prev.map((conversation) => (
-          conversation.id === conversationId
-            ? updater(conversation)
-            : conversation
-        ))
+        prev.map((conversation) => (conversation.id === conversationId ? updater(conversation) : conversation))
       )
     );
   }, []);
@@ -148,9 +187,7 @@ function Chat() {
 
     setConversations((prev) =>
       prev.map((conversation) => (
-        conversation.id === conversationId
-          ? { ...conversation, unreadCount: 0 }
-          : conversation
+        conversation.id === conversationId ? { ...conversation, unreadCount: 0 } : conversation
       ))
     );
 
@@ -173,12 +210,10 @@ function Chat() {
 
   const schedulePendingTimeout = useCallback((clientTempId) => {
     clearPendingTimeout(clientTempId);
-
     const timeoutId = setTimeout(() => {
       markMessageFailed(clientTempId);
       pendingTimeoutsRef.current.delete(clientTempId);
     }, 10000);
-
     pendingTimeoutsRef.current.set(clientTempId, timeoutId);
   }, [clearPendingTimeout, markMessageFailed]);
 
@@ -212,14 +247,9 @@ function Chat() {
   }, []);
 
   useEffect(() => {
-    if (!selectedConversationId || isSidebarLoading) {
-      return;
-    }
+    if (!selectedConversationId || isSidebarLoading) return;
 
-    const hasConversation = conversations.some(
-      (conversation) => conversation.id === selectedConversationId
-    );
-
+    const hasConversation = conversations.some((conversation) => conversation.id === selectedConversationId);
     if (!hasConversation) {
       navigate('/chat', { replace: true });
     }
@@ -245,6 +275,7 @@ function Chat() {
 
     const requestKey = `${selectedConversationId}::${normalizedMessageSearchQuery}`;
     activeMessageViewRef.current = requestKey;
+    setScrollToLatestToken((prev) => prev + 1);
     setIsMessagesLoading(true);
     setMessages([]);
     setHasMoreMessages(false);
@@ -257,9 +288,7 @@ function Chat() {
           search: normalizedMessageSearchQuery || undefined,
         });
 
-        if (activeMessageViewRef.current !== requestKey) {
-          return;
-        }
+        if (activeMessageViewRef.current !== requestKey) return;
 
         setMessages(data.messages);
         setHasMoreMessages(data.pagination.hasMore);
@@ -284,15 +313,13 @@ function Chat() {
   }, [normalizedMessageSearchQuery, selectedConversationId]);
 
   useEffect(() => {
-    if (!socket || !isConnected) return;
+    if (!socket || !isConnected) return undefined;
 
     const handleNewMessage = (message) => {
       const isActiveConversation = selectedConversationId === message.conversationId;
 
       if (isActiveConversation) {
-        setMessages((prev) =>
-          upsertVisibleMessage(prev, message, normalizedMessageSearchQuery)
-        );
+        setMessages((prev) => upsertVisibleMessage(prev, message, normalizedMessageSearchQuery));
       }
 
       if (isActiveConversation && !message.isOwn) {
@@ -308,9 +335,7 @@ function Chat() {
 
     const handleMessageAck = ({ clientTempId, message }) => {
       clearPendingTimeout(clientTempId);
-      setMessages((prev) =>
-        upsertVisibleMessage(prev, message, normalizedMessageSearchQuery)
-      );
+      setMessages((prev) => upsertVisibleMessage(prev, message, normalizedMessageSearchQuery));
       applyConversationMessage(message, 'zero');
     };
 
@@ -320,33 +345,24 @@ function Chat() {
 
       setMessages((prev) =>
         prev.map((message) => (
-          message.clientTempId === clientTempId
-            ? { ...message, status: 'failed' }
-            : message
+          message.clientTempId === clientTempId ? { ...message, status: 'failed' } : message
         ))
       );
     };
 
     const handleMessageUpdated = (message) => {
-      setMessages((prev) =>
-        upsertVisibleMessage(prev, message, normalizedMessageSearchQuery)
-      );
+      setMessages((prev) => upsertVisibleMessage(prev, message, normalizedMessageSearchQuery));
     };
 
     const handleMessageDeleted = (message) => {
-      setMessages((prev) =>
-        upsertVisibleMessage(prev, message, normalizedMessageSearchQuery)
-      );
+      setMessages((prev) => upsertVisibleMessage(prev, message, normalizedMessageSearchQuery));
     };
 
     const handleMessagesSeen = ({ messageIds, readAt }) => {
       const messageIdSet = new Set(messageIds);
-
       setMessages((prev) =>
         prev.map((message) => (
-          messageIdSet.has(message.id)
-            ? { ...message, readAt, status: 'seen' }
-            : message
+          messageIdSet.has(message.id) ? { ...message, readAt, status: 'seen' } : message
         ))
       );
     };
@@ -360,14 +376,29 @@ function Chat() {
       }));
     };
 
-    const handleUserTyping = (data) => {
-      if (selectedConversationId && data.conversationId === selectedConversationId) {
+    const handleConversationCreated = ({ conversation }) => {
+      upsertConversation(conversation);
+    };
+
+    const handleConversationMetaUpdated = ({ conversation }) => {
+      upsertConversation(conversation);
+    };
+
+    const handleConversationRemoved = ({ conversationId }) => {
+      removeConversation(conversationId);
+      if (conversationId === selectedConversationId) {
+        navigate('/chat');
+      }
+    };
+
+    const handleUserTyping = ({ conversationId }) => {
+      if (selectedConversationId && conversationId === selectedConversationId) {
         setIsOtherUserTyping(true);
       }
     };
 
-    const handleUserStopTyping = (data) => {
-      if (selectedConversationId && data.conversationId === selectedConversationId) {
+    const handleUserStopTyping = ({ conversationId }) => {
+      if (selectedConversationId && conversationId === selectedConversationId) {
         setIsOtherUserTyping(false);
       }
     };
@@ -379,6 +410,9 @@ function Chat() {
     socket.on('message_deleted', handleMessageDeleted);
     socket.on('messages_seen', handleMessagesSeen);
     socket.on('conversation_updated', handleConversationUpdated);
+    socket.on('conversation_created', handleConversationCreated);
+    socket.on('conversation_meta_updated', handleConversationMetaUpdated);
+    socket.on('conversation_removed', handleConversationRemoved);
     socket.on('user_typing', handleUserTyping);
     socket.on('user_stop_typing', handleUserStopTyping);
 
@@ -390,6 +424,9 @@ function Chat() {
       socket.off('message_deleted', handleMessageDeleted);
       socket.off('messages_seen', handleMessagesSeen);
       socket.off('conversation_updated', handleConversationUpdated);
+      socket.off('conversation_created', handleConversationCreated);
+      socket.off('conversation_meta_updated', handleConversationMetaUpdated);
+      socket.off('conversation_removed', handleConversationRemoved);
       socket.off('user_typing', handleUserTyping);
       socket.off('user_stop_typing', handleUserStopTyping);
     };
@@ -397,53 +434,56 @@ function Chat() {
     applyConversationMessage,
     clearPendingTimeout,
     isConnected,
+    navigate,
     normalizedMessageSearchQuery,
+    removeConversation,
     selectedConversationId,
     socket,
     syncConversationRead,
     updateConversationSummary,
+    upsertConversation,
   ]);
 
   const handleTyping = useCallback(() => {
     if (selectedConversation && isConnected) {
-      sendTyping(selectedConversation.id, selectedConversation.otherUser.id);
+      sendTyping(selectedConversation.id);
     }
-  }, [selectedConversation, isConnected, sendTyping]);
+  }, [isConnected, selectedConversation, sendTyping]);
 
   const handleStopTyping = useCallback(() => {
     if (selectedConversation && isConnected) {
-      sendStopTyping(selectedConversation.id, selectedConversation.otherUser.id);
+      sendStopTyping(selectedConversation.id);
     }
-  }, [selectedConversation, isConnected, sendStopTyping]);
+  }, [isConnected, selectedConversation, sendStopTyping]);
 
-  const handleSelectUser = async (selectedUser) => {
+  const handleSelectItem = async (item) => {
     try {
-      const existingConversation = conversations.find(
-        (conversation) => conversation.otherUser.id === selectedUser.id
-      );
-
-      if (existingConversation) {
+      if (item.kind === 'conversation') {
         setConversations((prev) =>
           prev.map((conversation) => (
-            conversation.id === existingConversation.id
-              ? { ...conversation, unreadCount: 0 }
-              : conversation
+            conversation.id === item.id ? { ...conversation, unreadCount: 0 } : conversation
           ))
         );
-        navigate(`/chat/${existingConversation.id}`);
+        navigate(`/chat/${item.id}`);
       } else {
-        const data = await api.conversations.create(selectedUser.id);
-        setConversations((prev) =>
-          sortConversationsByActivity([data.conversation, ...prev])
+        const existingConversation = conversations.find(
+          (conversation) => conversation.type === 'direct' && conversation.otherUser?.id === item.id
         );
-        navigate(`/chat/${data.conversation.id}`);
+
+        if (existingConversation) {
+          navigate(`/chat/${existingConversation.id}`);
+        } else {
+          const data = await api.conversations.create(item.id);
+          upsertConversation(data.conversation);
+          navigate(`/chat/${data.conversation.id}`);
+        }
       }
 
       if (isMobileViewport()) {
         setIsSidebarOpen(false);
       }
     } catch (err) {
-      console.error('Error selecting user:', err);
+      console.error('Error selecting sidebar item:', err);
     }
   };
 
@@ -468,9 +508,7 @@ function Chat() {
         search: normalizedMessageSearchQuery || undefined,
       });
 
-      if (activeMessageViewRef.current !== requestKey) {
-        return;
-      }
+      if (activeMessageViewRef.current !== requestKey) return;
 
       setMessages((prev) => mergeMessages(prev, data.messages));
       setHasMoreMessages(data.pagination.hasMore);
@@ -491,27 +529,43 @@ function Chat() {
     selectedConversationId,
   ]);
 
-  const sendNewMessage = useCallback(async ({ content, replyMessage, existingFailedMessage = null }) => {
-    if (!selectedConversation) {
-      return;
+  const uploadAttachments = useCallback(async (attachments) => {
+    if (!attachments?.length) {
+      return [];
     }
+
+    const uploadedAttachments = await Promise.all(
+      attachments.map(async (attachment) => {
+        if (!attachment.file) {
+          return attachment;
+        }
+
+        const formData = new FormData();
+        formData.append('file', attachment.file);
+        const data = await api.uploads.uploadAttachment(formData);
+        return data.attachment;
+      })
+    );
+
+    return uploadedAttachments;
+  }, []);
+
+  const sendNewMessage = useCallback(async ({ content, attachments = [], replyMessage, existingFailedMessage = null }) => {
+    if (!selectedConversation) return;
 
     const trimmedContent = content.trim();
-    if (!trimmedContent) {
-      return;
-    }
+    if (!trimmedContent && attachments.length === 0) return;
+
+    const uploadedAttachments = await uploadAttachments(attachments);
 
     const pendingMessage = existingFailedMessage
-      ? {
-          ...existingFailedMessage,
-          content: trimmedContent,
-          status: 'pending',
-        }
+      ? { ...existingFailedMessage, content: trimmedContent, attachments: uploadedAttachments, status: 'pending' }
       : createPendingMessage({
           content: trimmedContent,
           conversationId: selectedConversation.id,
           user,
           replyToMessage: replyMessage,
+          attachments: uploadedAttachments,
         });
 
     setMessages((prev) => {
@@ -521,6 +575,7 @@ function Chat() {
 
       return upsertVisibleMessage(nextMessages, pendingMessage, normalizedMessageSearchQuery);
     });
+
     applyConversationMessage(pendingMessage, 'zero');
     schedulePendingTimeout(pendingMessage.clientTempId);
 
@@ -528,24 +583,20 @@ function Chat() {
       content: trimmedContent,
       clientTempId: pendingMessage.clientTempId,
       replyToMessageId: replyMessage?.id || null,
+      attachmentIds: uploadedAttachments.map((attachment) => attachment.id),
     };
 
     setReplyToMessage(null);
 
     if (socket && isConnected) {
-      sendMessage({
-        conversationId: selectedConversation.id,
-        ...payload,
-      });
+      sendMessage({ conversationId: selectedConversation.id, ...payload });
       return;
     }
 
     try {
       const data = await api.conversations.sendMessage(selectedConversation.id, payload);
       clearPendingTimeout(pendingMessage.clientTempId);
-      setMessages((prev) =>
-        upsertVisibleMessage(prev, data.message, normalizedMessageSearchQuery)
-      );
+      setMessages((prev) => upsertVisibleMessage(prev, data.message, normalizedMessageSearchQuery));
       applyConversationMessage(data.message, 'zero');
     } catch (err) {
       clearPendingTimeout(pendingMessage.clientTempId);
@@ -557,6 +608,7 @@ function Chat() {
         ))
       );
       console.error('Error sending message:', err);
+      throw err;
     }
   }, [
     applyConversationMessage,
@@ -567,13 +619,12 @@ function Chat() {
     selectedConversation,
     sendMessage,
     socket,
+    uploadAttachments,
     user,
   ]);
 
-  const handleSubmitMessage = async (content) => {
-    if (!selectedConversation) {
-      return;
-    }
+  const handleSubmitMessage = async ({ content, attachments = [] }) => {
+    if (!selectedConversation) return;
 
     if (editingMessage) {
       try {
@@ -582,9 +633,7 @@ function Chat() {
           editingMessage.id,
           content.trim()
         );
-        setMessages((prev) =>
-          upsertVisibleMessage(prev, data.message, normalizedMessageSearchQuery)
-        );
+        setMessages((prev) => upsertVisibleMessage(prev, data.message, normalizedMessageSearchQuery));
 
         if (selectedConversation.lastMessage?.id === data.message.id) {
           applyConversationMessage(data.message, 'keep');
@@ -593,15 +642,13 @@ function Chat() {
         setEditingMessageId(null);
       } catch (err) {
         console.error('Error editing message:', err);
+        throw err;
       }
 
       return;
     }
 
-    await sendNewMessage({
-      content,
-      replyMessage: replyToMessage,
-    });
+    await sendNewMessage({ content, attachments, replyMessage: replyToMessage });
   };
 
   const handleReplyMessage = (message) => {
@@ -615,15 +662,11 @@ function Chat() {
   };
 
   const handleDeleteMessage = async (message) => {
-    if (!selectedConversation) {
-      return;
-    }
+    if (!selectedConversation) return;
 
     try {
       const data = await api.conversations.deleteMessage(selectedConversation.id, message.id);
-      setMessages((prev) =>
-        upsertVisibleMessage(prev, data.message, normalizedMessageSearchQuery)
-      );
+      setMessages((prev) => upsertVisibleMessage(prev, data.message, normalizedMessageSearchQuery));
 
       if (selectedConversation.lastMessage?.id === data.message.id) {
         applyConversationMessage(data.message, 'keep');
@@ -649,61 +692,101 @@ function Chat() {
     });
   };
 
-  const sidebarItems = useMemo(() => {
-    const userConversationMap = new Map();
+  const handleCreateGroup = async ({ name, participantIds }) => {
+    setIsGroupSubmitting(true);
 
-    conversations.forEach((conversation) => {
-      userConversationMap.set(conversation.otherUser.id, {
-        ...conversation.otherUser,
-        conversationId: conversation.id,
-        lastMessage: conversation.lastMessage?.content || null,
-        lastMessageIsOwn: conversation.lastMessage?.isOwn || false,
+    try {
+      const data = await api.conversations.createGroup({ name, participantIds });
+      upsertConversation(data.conversation);
+      setIsCreateGroupOpen(false);
+      navigate(`/chat/${data.conversation.id}`);
+
+      if (isMobileViewport()) {
+        setIsSidebarOpen(false);
+      }
+    } catch (err) {
+      console.error('Error creating group:', err);
+    } finally {
+      setIsGroupSubmitting(false);
+    }
+  };
+
+  const handleManageGroup = async ({ name, participantIds }) => {
+    if (!selectedConversation) return;
+
+    setIsGroupSubmitting(true);
+
+    try {
+      const data = await api.conversations.updateGroup(selectedConversation.id, {
+        name,
+        participantIds,
+      });
+      upsertConversation(data.conversation);
+      setIsManageGroupOpen(false);
+    } catch (err) {
+      console.error('Error updating group:', err);
+    } finally {
+      setIsGroupSubmitting(false);
+    }
+  };
+
+  const sidebarItems = useMemo(() => {
+    const directConversationUserIds = new Set();
+    const conversationItems = conversations.map((conversation) => {
+      if (conversation.type === 'direct' && conversation.otherUser?.id) {
+        directConversationUserIds.add(conversation.otherUser.id);
+      }
+
+      return {
+        kind: 'conversation',
+        id: conversation.id,
+        type: conversation.type,
+        title: getConversationTitle(conversation),
+        subtitle: getConversationSubtitle(conversation),
+        avatarUrl: conversation.type === 'direct' ? conversation.otherUser?.avatarUrl || null : null,
+        otherUser: conversation.otherUser || null,
+        participants: conversation.participants || [],
         lastActivityAt: conversation.lastActivityAt || conversation.updatedAt,
         unreadCount: conversation.unreadCount || 0,
-        hasConversation: true,
-      });
+        searchText: [
+          getConversationTitle(conversation),
+          getConversationSubtitle(conversation),
+          conversation.otherUser?.email,
+          ...(conversation.participants || []).map((participant) => participant.name),
+        ].filter(Boolean).join(' ').toLowerCase(),
+      };
     });
 
-    users.forEach((listedUser) => {
-      if (!userConversationMap.has(listedUser.id)) {
-        userConversationMap.set(listedUser.id, {
-          ...listedUser,
-          conversationId: null,
-          lastMessage: null,
-          lastMessageIsOwn: false,
-          lastActivityAt: null,
-          unreadCount: 0,
-          hasConversation: false,
-        });
-      }
-    });
+    const discoverableUsers = users
+      .filter((listedUser) => !directConversationUserIds.has(listedUser.id))
+      .map((listedUser) => ({
+        kind: 'user',
+        id: listedUser.id,
+        type: 'direct',
+        title: listedUser.name,
+        subtitle: listedUser.statusText || listedUser.email || 'Start a conversation',
+        avatarUrl: listedUser.avatarUrl || null,
+        otherUser: listedUser,
+        participants: [],
+        lastActivityAt: null,
+        unreadCount: 0,
+        searchText: [listedUser.name, listedUser.email, listedUser.statusText]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase(),
+      }));
 
     const normalizedQuery = searchQuery.trim().toLowerCase();
 
-    return Array.from(userConversationMap.values())
-      .filter((item) => {
-        if (!normalizedQuery) return true;
-
-        const searchableText = [item.name, item.email, item.lastMessage]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase();
-
-        return searchableText.includes(normalizedQuery);
-      })
+    return [...conversationItems, ...discoverableUsers]
+      .filter((item) => !normalizedQuery || item.searchText.includes(normalizedQuery))
       .sort((a, b) => {
         const aDate = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
         const bDate = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
 
-        if (aDate !== bDate) {
-          return bDate - aDate;
-        }
-
-        if (a.hasConversation !== b.hasConversation) {
-          return a.hasConversation ? -1 : 1;
-        }
-
-        return a.name.localeCompare(b.name);
+        if (aDate !== bDate) return bDate - aDate;
+        if (a.kind !== b.kind) return a.kind === 'conversation' ? -1 : 1;
+        return a.title.localeCompare(b.title);
       });
   }, [conversations, searchQuery, users]);
 
@@ -716,9 +799,10 @@ function Chat() {
       )}
 
       <Sidebar
-        users={sidebarItems}
-        selectedUserId={selectedConversation?.otherUser?.id || null}
-        onSelectUser={handleSelectUser}
+        items={sidebarItems}
+        selectedConversationId={selectedConversationId}
+        onSelectItem={handleSelectItem}
+        onCreateGroup={() => setIsCreateGroupOpen(true)}
         isOpen={isSidebarOpen}
         onToggle={() => setIsSidebarOpen((prev) => !prev)}
         currentUser={user}
@@ -727,13 +811,13 @@ function Chat() {
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
       />
-
       <div className={`min-h-0 min-w-0 flex-1 flex-col ${isSidebarOpen ? 'hidden lg:flex' : 'flex'}`}>
         {selectedConversation ? (
           <>
             <ChatHeader
-              user={selectedConversation.otherUser}
+              conversation={selectedConversation}
               onMenuClick={() => setIsSidebarOpen((prev) => !prev)}
+              onManageConversation={() => setIsManageGroupOpen(true)}
               isTyping={isOtherUserTyping}
             />
 
@@ -780,12 +864,15 @@ function Chat() {
             </div>
 
             <MessageList
+              key={`messages-${selectedConversationId}-${normalizedMessageSearchQuery || 'all'}`}
               messages={messages}
               isTyping={isOtherUserTyping}
               isLoading={isMessagesLoading}
               isLoadingOlder={isLoadingOlderMessages}
               hasMoreMessages={hasMoreMessages}
               activeConversationId={selectedConversationId}
+              conversationType={selectedConversation.type}
+              scrollToLatestToken={scrollToLatestToken}
               searchQuery={normalizedMessageSearchQuery}
               onLoadOlder={loadOlderMessages}
               onReply={handleReplyMessage}
@@ -831,6 +918,28 @@ function Chat() {
           </div>
         )}
       </div>
+
+      <GroupModal
+        key={`create-group-${isCreateGroupOpen ? 'open' : 'closed'}`}
+        isOpen={isCreateGroupOpen}
+        mode="create"
+        users={availableGroupUsers}
+        onClose={() => setIsCreateGroupOpen(false)}
+        onSubmit={handleCreateGroup}
+        isSubmitting={isGroupSubmitting}
+      />
+
+      <GroupModal
+        key={`manage-group-${selectedConversation?.id || 'none'}-${isManageGroupOpen ? 'open' : 'closed'}`}
+        isOpen={isManageGroupOpen && selectedConversation?.type === 'group'}
+        mode="edit"
+        users={availableGroupUsers}
+        initialName={selectedConversation?.name || ''}
+        initialParticipantIds={(selectedConversation?.participants || []).map((participant) => participant.id)}
+        onClose={() => setIsManageGroupOpen(false)}
+        onSubmit={handleManageGroup}
+        isSubmitting={isGroupSubmitting}
+      />
     </div>
   );
 }

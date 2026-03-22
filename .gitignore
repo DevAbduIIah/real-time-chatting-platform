@@ -115,8 +115,11 @@ client/.vite/
 server/uploads/*
 !server/uploads/.gitkeep
 !server/uploads/avatars/
+!server/uploads/attachments/
 server/uploads/avatars/*
 !server/uploads/avatars/.gitkeep
+server/uploads/attachments/*
+!server/uploads/attachments/.gitkeep
 
 # Vercel
 .vercel

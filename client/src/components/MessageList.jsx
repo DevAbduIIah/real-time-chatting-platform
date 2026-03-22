@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import EmptyState from './EmptyState';
 import { MessageListSkeleton } from './LoadingSkeletons';
 import UserAvatar from './UserAvatar';
+import AttachmentPreview from './AttachmentPreview';
 import {
   formatMessageDateLabel,
   formatMessageTime,
@@ -85,6 +86,8 @@ function MessageList({
   isLoadingOlder,
   hasMoreMessages,
   activeConversationId,
+  conversationType,
+  scrollToLatestToken,
   searchQuery,
   onLoadOlder,
   onReply,
@@ -112,10 +115,12 @@ function MessageList({
         top: container.scrollHeight,
         behavior,
       });
-      return;
     }
 
-    messagesEndRef.current?.scrollIntoView({ behavior });
+    messagesEndRef.current?.scrollIntoView({
+      behavior,
+      block: 'end',
+    });
   }, []);
 
   const requestOlderMessages = useCallback(() => {
@@ -153,6 +158,10 @@ function MessageList({
   }, [hasMoreMessages, isLoadingOlder, messages.length, requestOlderMessages]);
 
   useEffect(() => {
+    isNearBottomRef.current = true;
+  }, [activeConversationId, searchQuery]);
+
+  useEffect(() => {
     if (!isLoadingOlder) {
       autoLoadGuardRef.current = false;
     }
@@ -173,6 +182,27 @@ function MessageList({
     container.scrollTop = anchorRef.current.scrollTop + heightDelta;
     anchorRef.current = null;
   }, [isLoadingOlder, messages]);
+
+  useLayoutEffect(() => {
+    if (isLoading || messages.length === 0) {
+      return;
+    }
+
+    let secondFrameId = 0;
+    const frameId = window.requestAnimationFrame(() => {
+      scrollToBottom('auto');
+      secondFrameId = window.requestAnimationFrame(() => {
+        scrollToBottom('auto');
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      if (secondFrameId) {
+        window.cancelAnimationFrame(secondFrameId);
+      }
+    };
+  }, [isLoading, messages.length, scrollToLatestToken, scrollToBottom]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -292,6 +322,12 @@ function MessageList({
               )}
 
               <div className="max-w-[min(88%,42rem)]">
+                {!message.isOwn && conversationType === 'group' && (
+                  <p className="theme-muted mb-2 px-1 text-xs font-semibold uppercase tracking-[0.12em]">
+                    {message.senderName}
+                  </p>
+                )}
+
                 <div
                   className={`
                     rounded-3xl px-4 py-3 shadow-sm ring-1
@@ -324,9 +360,21 @@ function MessageList({
                       Message deleted
                     </p>
                   ) : (
-                    <p className="whitespace-pre-wrap break-words text-[15px] leading-6">
-                      {renderHighlightedText(message.content, searchQuery)}
-                    </p>
+                    <div className="space-y-3">
+                      {message.attachments?.length > 0 && (
+                        <div className="space-y-2">
+                          {message.attachments.map((attachment) => (
+                            <AttachmentPreview key={attachment.id} attachment={attachment} />
+                          ))}
+                        </div>
+                      )}
+
+                      {message.content && (
+                        <p className="whitespace-pre-wrap break-words text-[15px] leading-6">
+                          {renderHighlightedText(message.content, searchQuery)}
+                        </p>
+                      )}
+                    </div>
                   )}
 
                   <div

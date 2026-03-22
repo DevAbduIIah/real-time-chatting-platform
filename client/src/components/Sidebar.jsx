@@ -6,9 +6,10 @@ import { ConversationListSkeleton } from './LoadingSkeletons';
 import { formatConversationTime } from '../lib/formatters';
 
 function Sidebar({
-  users,
-  selectedUserId,
-  onSelectUser,
+  items,
+  selectedConversationId,
+  onSelectItem,
+  onCreateGroup,
   isOpen,
   onToggle,
   currentUser,
@@ -42,11 +43,21 @@ function Sidebar({
         `}
       >
         <div className="border-b px-4 pb-4 pt-5 theme-border">
-          <div>
-            <h1 className="theme-text text-xl font-bold">Messages</h1>
-            <p className="theme-muted mt-1 text-sm">
-              Stay on top of your latest conversations
-            </p>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h1 className="theme-text text-xl font-bold">Messages</h1>
+              <p className="theme-muted mt-1 text-sm">
+                Stay on top of your latest conversations
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={onCreateGroup}
+              className="rounded-full bg-indigo-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700"
+            >
+              New group
+            </button>
           </div>
 
           <div className="relative mt-4">
@@ -71,13 +82,13 @@ function Sidebar({
         <div className="flex-1 overflow-y-auto">
           {isLoading ? (
             <ConversationListSkeleton />
-          ) : users.length === 0 ? (
+          ) : items.length === 0 ? (
             <EmptyState
-              title={searchQuery ? 'No users found' : 'No conversations yet'}
+              title={searchQuery ? 'No conversations found' : 'No conversations yet'}
               description={
                 searchQuery
-                  ? 'Try a different name or email to find the conversation you want.'
-                  : 'When more people join, their conversations will show up here.'
+                  ? 'Try a different name, group title, or message preview.'
+                  : 'Start a direct chat or create a group to get things moving.'
               }
               icon={(
                 <svg className="h-8 w-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -87,53 +98,62 @@ function Sidebar({
             />
           ) : (
             <div className="space-y-1 p-3">
-              {users.map((user) => (
-                <button
-                  key={user.id}
-                  onClick={() => onSelectUser(user)}
-                  className={`
-                    w-full rounded-2xl px-3 py-3 text-left transition
-                    hover:bg-white/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/20
-                    ${selectedUserId === user.id ? 'bg-indigo-500/10 ring-1 ring-indigo-400/20' : ''}
-                  `}
-                >
-                  <div className="flex items-center gap-3">
-                    <UserAvatar
-                      name={user.name}
-                      avatarUrl={user.avatarUrl}
-                      isOnline={isUserOnline(user.id)}
-                      showStatus
-                      size="lg"
-                    />
+              {items.map((item) => {
+                const isSelected = item.kind === 'conversation' && selectedConversationId === item.id;
+                const showStatus = item.kind === 'conversation' && item.type === 'direct';
+                const online = showStatus ? isUserOnline(item.otherUser?.id) : false;
 
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between">
-                        <span className="theme-text truncate font-semibold">{user.name}</span>
-                        {user.lastActivityAt && (
-                          <span className="theme-muted ml-2 flex-shrink-0 text-xs font-medium">
-                            {formatConversationTime(user.lastActivityAt)}
-                          </span>
-                        )}
-                      </div>
+                return (
+                  <button
+                    key={`${item.kind}-${item.id}`}
+                    onClick={() => onSelectItem(item)}
+                    className={`
+                      w-full rounded-2xl px-3 py-3 text-left transition
+                      hover:bg-white/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/20
+                      ${isSelected ? 'bg-indigo-500/10 ring-1 ring-indigo-400/20' : ''}
+                    `}
+                  >
+                    <div className="flex items-center gap-3">
+                      <UserAvatar
+                        name={item.title}
+                        avatarUrl={item.avatarUrl}
+                        isOnline={online}
+                        showStatus={showStatus}
+                        size="lg"
+                      />
 
-                      <div className="mt-1 flex items-center gap-2">
-                        <p className="theme-muted min-w-0 flex-1 truncate text-sm">
-                          {user.lastMessage
-                            ? `${user.lastMessageIsOwn ? 'You: ' : ''}${user.lastMessage}`
-                            : user.hasConversation
-                              ? 'No messages yet'
-                              : 'Start a conversation'}
-                        </p>
-                        {user.unreadCount > 0 && (
-                          <span className="inline-flex min-w-[1.5rem] items-center justify-center rounded-full bg-indigo-600 px-2 py-0.5 text-xs font-semibold text-white">
-                            {user.unreadCount}
-                          </span>
-                        )}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <span className="theme-text truncate font-semibold">{item.title}</span>
+                            {item.kind === 'conversation' && item.type === 'group' && (
+                              <span className="ml-2 rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-indigo-600">
+                                Group
+                              </span>
+                            )}
+                          </div>
+                          {item.lastActivityAt && (
+                            <span className="theme-muted ml-2 flex-shrink-0 text-xs font-medium">
+                              {formatConversationTime(item.lastActivityAt)}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="mt-1 flex items-center gap-2">
+                          <p className="theme-muted min-w-0 flex-1 truncate text-sm">
+                            {item.subtitle}
+                          </p>
+                          {item.unreadCount > 0 && (
+                            <span className="inline-flex min-w-[1.5rem] items-center justify-center rounded-full bg-indigo-600 px-2 py-0.5 text-xs font-semibold text-white">
+                              {item.unreadCount}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </button>
-              ))}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
