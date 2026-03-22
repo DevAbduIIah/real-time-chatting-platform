@@ -2,19 +2,20 @@ const express = require('express');
 const prisma = require('../lib/prisma');
 const auth = require('../middleware/auth');
 const { connectedUsers } = require('../socket');
-const { publicUserSelect } = require('./user-helpers');
 const {
+  buildConversationRoom,
   formatConversationSummary,
+  getConversationInclude,
+  getConversationParticipantIds,
   getConversationReadAt,
   getConversationReadUpdateData,
+  isGroupConversation,
 } = require('./conversation-helpers');
 const {
   formatMessage,
+  getConversationRecipientIds,
   getMessageInclude,
   getMessagePreview,
-  getRecipientId,
-  normalizeAttachmentIds,
-  resolvePendingAttachments,
 } = require('./message-helpers');
 
 const router = express.Router();
@@ -26,6 +27,11 @@ function getConversationWhereForUser(userId) {
     OR: [
       { user1Id: userId },
       { user2Id: userId },
+      {
+        participants: {
+          some: { userId },
+        },
+      },
     ],
   };
 }
@@ -36,6 +42,7 @@ async function getConversationById(conversationId, userId) {
       id: conversationId,
       ...getConversationWhereForUser(userId),
     },
+    include: getConversationInclude(),
   });
 }
 
@@ -137,6 +144,14 @@ async function getPaginatedMessages({
   };
 }
 
+function getUniqueUserIds(userIds) {
+  return [...new Set(userIds.filter(Boolean))];
+}
+
+function sortDirectParticipantIds(leftUserId, rightUserId) {
+  return [leftUserId, rightUserId].sort((leftId, rightId) => leftId.localeCompare(rightId));
+}
+
 async function getUnreadCount(conversation, currentUserId) {
   const readAt = getConversationReadAt(conversation, currentUserId) || new Date(0);
 
@@ -144,7 +159,6 @@ async function getUnreadCount(conversation, currentUserId) {
     where: {
       conversationId: conversation.id,
       senderId: { not: currentUserId },
-      readAt: null,
       createdAt: { gt: readAt },
       deletedAt: null,
     },
@@ -156,22 +170,39 @@ async function formatConversationWithUnread(conversation, currentUserId) {
   return formatConversationSummary(conversation, currentUserId, unreadCount);
 }
 
+async function emitConversationSummaries(io, eventName, conversation, userIds) {
+  if (!io || !conversation) {
+    return;
+  }
+
+  await Promise.all(
+    getUniqueUserIds(userIds).map(async (userId) => {
+      const summary = await formatConversationWithUnread(conversation, userId);
+      io.to(userId).emit(eventName, { conversation: summary });
+    })
+  );
+}
+
 async function markConversationAsSeen(conversation, currentUserId, io) {
   const seenAt = new Date();
+  const readAt = getConversationReadAt(conversation, currentUserId) || new Date(0);
   const messageRows = await prisma.message.findMany({
     where: {
       conversationId: conversation.id,
       senderId: { not: currentUserId },
-      readAt: null,
+      createdAt: { gt: readAt },
     },
     select: {
       id: true,
       senderId: true,
+      readAt: true,
     },
   });
 
-  if (messageRows.length > 0) {
-    const messageIds = messageRows.map((message) => message.id);
+  const unseenMessages = messageRows.filter((message) => !message.readAt);
+
+  if (unseenMessages.length > 0) {
+    const messageIds = unseenMessages.map((message) => message.id);
 
     await prisma.message.updateMany({
       where: { id: { in: messageIds } },
@@ -181,7 +212,7 @@ async function markConversationAsSeen(conversation, currentUserId, io) {
       },
     });
 
-    const senderIds = [...new Set(messageRows.map((message) => message.senderId))];
+    const senderIds = [...new Set(unseenMessages.map((message) => message.senderId))];
     senderIds.forEach((senderId) => {
       io?.to(senderId).emit('messages_seen', {
         conversationId: conversation.id,
@@ -191,10 +222,17 @@ async function markConversationAsSeen(conversation, currentUserId, io) {
     });
   }
 
+  const readUpdateData = getConversationReadUpdateData(conversation, currentUserId, seenAt);
+  if (Object.keys(readUpdateData).length === 0) {
+    return seenAt;
+  }
+
   await prisma.conversation.update({
     where: { id: conversation.id },
-    data: getConversationReadUpdateData(conversation, currentUserId, seenAt),
+    data: readUpdateData,
   });
+
+  return seenAt;
 }
 
 async function validateReplyTarget(replyToMessageId, conversationId) {
@@ -202,7 +240,7 @@ async function validateReplyTarget(replyToMessageId, conversationId) {
     return null;
   }
 
-  const replyMessage = await prisma.message.findFirst({
+  return prisma.message.findFirst({
     where: {
       id: replyToMessageId,
       conversationId,
@@ -211,15 +249,83 @@ async function validateReplyTarget(replyToMessageId, conversationId) {
       sender: { select: { id: true, name: true } },
     },
   });
-
-  return replyMessage;
 }
 
-function emitMessageUpdate(io, conversation, currentUserId, eventName, message) {
-  const recipientId = getRecipientId(conversation, currentUserId);
+async function validateAttachmentIds(attachmentIds, currentUserId) {
+  const normalizedIds = Array.isArray(attachmentIds)
+    ? [...new Set(attachmentIds.filter(Boolean))]
+    : [];
+
+  if (normalizedIds.length === 0) {
+    return [];
+  }
+
+  const attachments = await prisma.attachment.findMany({
+    where: {
+      id: { in: normalizedIds },
+      uploadedById: currentUserId,
+      messageId: null,
+    },
+  });
+
+  if (attachments.length !== normalizedIds.length) {
+    return null;
+  }
+
+  return attachments;
+}
+
+function emitConversationActivity(io, conversationId, message, senderId) {
+  const conversationRoom = buildConversationRoom(conversationId);
+
+  io?.to(senderId).emit('conversation_updated', {
+    conversationId,
+    lastMessage: getMessagePreview(message, senderId),
+    lastActivityAt: message.createdAt,
+  });
+
+  io?.to(conversationRoom).except(senderId).emit('conversation_updated', {
+    conversationId,
+    lastMessage: getMessagePreview(message, null),
+    lastActivityAt: message.createdAt,
+  });
+}
+
+function emitMessageUpdate(io, conversationId, eventName, message, currentUserId) {
+  const conversationRoom = buildConversationRoom(conversationId);
 
   io?.to(currentUserId).emit(eventName, formatMessage(message, currentUserId));
-  io?.to(recipientId).emit(eventName, formatMessage(message, recipientId));
+  io?.to(conversationRoom).except(currentUserId).emit(eventName, formatMessage(message, null));
+}
+
+async function syncConversationRoomMembership(io, conversationId, addedUserIds = [], removedUserIds = []) {
+  if (!io) {
+    return;
+  }
+
+  const room = buildConversationRoom(conversationId);
+
+  if (addedUserIds.length > 0) {
+    await Promise.all(addedUserIds.map((userId) => io.in(userId).socketsJoin(room)));
+  }
+
+  if (removedUserIds.length > 0) {
+    await Promise.all(removedUserIds.map((userId) => io.in(userId).socketsLeave(room)));
+  }
+}
+
+async function getGroupConversationForEdit(conversationId, userId) {
+  const conversation = await getConversationById(conversationId, userId);
+
+  if (!conversation) {
+    return null;
+  }
+
+  if (!isGroupConversation(conversation)) {
+    return false;
+  }
+
+  return conversation;
 }
 
 // Get all conversations for the current user
@@ -227,14 +333,7 @@ router.get('/', auth, async (req, res) => {
   try {
     const conversations = await prisma.conversation.findMany({
       where: getConversationWhereForUser(req.user.id),
-      include: {
-        user1: { select: publicUserSelect },
-        user2: { select: publicUserSelect },
-        messages: {
-          orderBy: { createdAt: 'desc' },
-          take: 1,
-        },
-      },
+      include: getConversationInclude(),
       orderBy: { updatedAt: 'desc' },
     });
 
@@ -251,7 +350,7 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
-// Get or create a conversation with another user
+// Get or create a direct conversation with another user
 router.post('/', auth, async (req, res) => {
   try {
     const { userId } = req.body;
@@ -264,21 +363,16 @@ router.post('/', auth, async (req, res) => {
       return res.status(400).json({ error: 'Cannot create conversation with yourself.' });
     }
 
+    const [user1Id, user2Id] = sortDirectParticipantIds(req.user.id, userId);
     const existingConversation = await prisma.conversation.findFirst({
       where: {
+        type: 'direct',
         OR: [
           { user1Id: req.user.id, user2Id: userId },
           { user1Id: userId, user2Id: req.user.id },
         ],
       },
-      include: {
-        user1: { select: publicUserSelect },
-        user2: { select: publicUserSelect },
-        messages: {
-          orderBy: { createdAt: 'desc' },
-          take: 1,
-        },
-      },
+      include: getConversationInclude(),
     });
 
     if (existingConversation) {
@@ -290,26 +384,178 @@ router.post('/', auth, async (req, res) => {
     const now = new Date();
     const conversation = await prisma.conversation.create({
       data: {
-        user1Id: req.user.id,
-        user2Id: userId,
+        type: 'direct',
+        user1Id,
+        user2Id,
         user1LastReadAt: now,
         user2LastReadAt: now,
-      },
-      include: {
-        user1: { select: publicUserSelect },
-        user2: { select: publicUserSelect },
-        messages: {
-          orderBy: { createdAt: 'desc' },
-          take: 1,
+        participants: {
+          create: [
+            { userId: req.user.id, lastReadAt: now },
+            { userId, lastReadAt: now },
+          ],
         },
       },
+      include: getConversationInclude(),
     });
 
+    const io = req.app.get('io');
+    await syncConversationRoomMembership(io, conversation.id, [req.user.id, userId]);
+    await emitConversationSummaries(io, 'conversation_created', conversation, [userId]);
+
     res.status(201).json({
-      conversation: formatConversationSummary(conversation, req.user.id, 0),
+      conversation: await formatConversationWithUnread(conversation, req.user.id),
     });
   } catch (err) {
     console.error('Create conversation error:', err);
+    res.status(500).json({ error: 'Server error. Please try again.' });
+  }
+});
+
+// Create a group conversation
+router.post('/group', auth, async (req, res) => {
+  try {
+    const { name, participantIds } = req.body;
+    const otherParticipantIds = getUniqueUserIds(Array.isArray(participantIds) ? participantIds : [])
+      .filter((userId) => userId !== req.user.id);
+
+    if (!name?.trim()) {
+      return res.status(400).json({ error: 'Group name is required.' });
+    }
+
+    if (otherParticipantIds.length === 0) {
+      return res.status(400).json({ error: 'Select at least one participant.' });
+    }
+
+    const existingUsers = await prisma.user.findMany({
+      where: {
+        id: { in: otherParticipantIds },
+      },
+      select: { id: true },
+    });
+
+    if (existingUsers.length !== otherParticipantIds.length) {
+      return res.status(400).json({ error: 'One or more selected users do not exist.' });
+    }
+
+    const allParticipantIds = [req.user.id, ...otherParticipantIds];
+    const now = new Date();
+    const conversation = await prisma.conversation.create({
+      data: {
+        type: 'group',
+        name: name.trim(),
+        participants: {
+          create: allParticipantIds.map((userId) => ({
+            userId,
+            lastReadAt: now,
+          })),
+        },
+      },
+      include: getConversationInclude(),
+    });
+
+    const io = req.app.get('io');
+    await syncConversationRoomMembership(io, conversation.id, allParticipantIds);
+    await emitConversationSummaries(io, 'conversation_created', conversation, otherParticipantIds);
+
+    res.status(201).json({
+      conversation: await formatConversationWithUnread(conversation, req.user.id),
+    });
+  } catch (err) {
+    console.error('Create group conversation error:', err);
+    res.status(500).json({ error: 'Server error. Please try again.' });
+  }
+});
+
+// Update a group conversation
+router.patch('/:id', auth, async (req, res) => {
+  try {
+    const conversation = await getGroupConversationForEdit(req.params.id, req.user.id);
+
+    if (conversation === null) {
+      return res.status(404).json({ error: 'Conversation not found.' });
+    }
+
+    if (conversation === false) {
+      return res.status(400).json({ error: 'Only group conversations can be updated here.' });
+    }
+
+    const nextName = typeof req.body.name === 'string'
+      ? req.body.name.trim()
+      : conversation.name;
+    const requestedParticipantIds = Array.isArray(req.body.participantIds)
+      ? getUniqueUserIds(req.body.participantIds).filter((userId) => userId !== req.user.id)
+      : null;
+
+    if (!nextName) {
+      return res.status(400).json({ error: 'Group name is required.' });
+    }
+
+    let nextParticipantIds = null;
+    if (requestedParticipantIds) {
+      if (requestedParticipantIds.length === 0) {
+        return res.status(400).json({ error: 'A group needs at least one other participant.' });
+      }
+
+      const existingUsers = await prisma.user.findMany({
+        where: {
+          id: { in: requestedParticipantIds },
+        },
+        select: { id: true },
+      });
+
+      if (existingUsers.length !== requestedParticipantIds.length) {
+        return res.status(400).json({ error: 'One or more selected users do not exist.' });
+      }
+
+      nextParticipantIds = [req.user.id, ...requestedParticipantIds];
+    }
+
+    const currentParticipantIds = getConversationParticipantIds(conversation);
+    const addedUserIds = nextParticipantIds
+      ? nextParticipantIds.filter((userId) => !currentParticipantIds.includes(userId))
+      : [];
+    const removedUserIds = nextParticipantIds
+      ? currentParticipantIds.filter((userId) => !nextParticipantIds.includes(userId))
+      : [];
+
+    const updatedConversation = await prisma.conversation.update({
+      where: { id: conversation.id },
+      data: {
+        name: nextName,
+        ...(nextParticipantIds
+          ? {
+              participants: {
+                deleteMany: {
+                  userId: { in: removedUserIds },
+                },
+                create: addedUserIds.map((userId) => ({
+                  userId,
+                  lastReadAt: new Date(),
+                })),
+              },
+            }
+          : {}),
+      },
+      include: getConversationInclude(),
+    });
+
+    const io = req.app.get('io');
+    if (nextParticipantIds) {
+      await syncConversationRoomMembership(io, updatedConversation.id, addedUserIds, removedUserIds);
+    }
+
+    const remainingUserIds = getConversationParticipantIds(updatedConversation);
+    await emitConversationSummaries(io, 'conversation_meta_updated', updatedConversation, remainingUserIds);
+    removedUserIds.forEach((userId) => {
+      io?.to(userId).emit('conversation_removed', { conversationId: updatedConversation.id });
+    });
+
+    res.json({
+      conversation: await formatConversationWithUnread(updatedConversation, req.user.id),
+    });
+  } catch (err) {
+    console.error('Update group conversation error:', err);
     res.status(500).json({ error: 'Server error. Please try again.' });
   }
 });
@@ -357,9 +603,9 @@ router.post('/:id/read', auth, async (req, res) => {
     }
 
     const io = req.app.get('io');
-    await markConversationAsSeen(conversation, req.user.id, io);
+    const readAt = await markConversationAsSeen(conversation, req.user.id, io);
 
-    res.json({ conversationId: id, readAt: new Date() });
+    res.json({ conversationId: id, readAt: readAt || new Date() });
   } catch (err) {
     console.error('Mark conversation read error:', err);
     res.status(500).json({ error: 'Server error. Please try again.' });
@@ -371,11 +617,10 @@ router.post('/:id/messages', auth, async (req, res) => {
   try {
     const { id } = req.params;
     const { content, clientTempId, replyToMessageId, attachmentIds } = req.body;
-    const normalizedContent = content?.trim() || '';
-    const normalizedAttachmentIds = normalizeAttachmentIds(attachmentIds);
+    const trimmedContent = typeof content === 'string' ? content.trim() : '';
 
-    if (!normalizedContent && normalizedAttachmentIds.length === 0) {
-      return res.status(400).json({ error: 'Message content is required.' });
+    if (!trimmedContent && (!Array.isArray(attachmentIds) || attachmentIds.length === 0)) {
+      return res.status(400).json({ error: 'Message content or an attachment is required.' });
     }
 
     const conversation = await getConversationById(id, req.user.id);
@@ -401,51 +646,58 @@ router.post('/:id/messages', auth, async (req, res) => {
     }
 
     const replyToMessage = await validateReplyTarget(replyToMessageId, id);
-    const attachments = await resolvePendingAttachments(prisma, normalizedAttachmentIds, req.user.id);
 
     if (replyToMessageId && !replyToMessage) {
       return res.status(400).json({ error: 'Reply target not found.' });
     }
 
-    if (attachments.length !== normalizedAttachmentIds.length) {
+    const validAttachments = await validateAttachmentIds(attachmentIds, req.user.id);
+    if (attachmentIds?.length && !validAttachments) {
       return res.status(400).json({ error: 'One or more attachments are invalid.' });
     }
 
-    const recipientId = getRecipientId(conversation, req.user.id);
-    const deliveredAt = connectedUsers.has(recipientId) ? new Date() : null;
+    const recipientIds = getConversationRecipientIds(conversation, req.user.id);
+    const deliveredAt = recipientIds.some((recipientId) => connectedUsers.has(recipientId))
+      ? new Date()
+      : null;
 
     const message = await prisma.message.create({
       data: {
-        content: normalizedContent || null,
+        content: trimmedContent,
         clientTempId: clientTempId || null,
         replyToMessageId: replyToMessage?.id || null,
         deliveredAt,
         senderId: req.user.id,
         conversationId: id,
-        attachments: normalizedAttachmentIds.length > 0
+        ...(validAttachments?.length
           ? {
-              connect: attachments.map((attachment) => ({ id: attachment.id })),
+              attachments: {
+                connect: validAttachments.map((attachment) => ({ id: attachment.id })),
+              },
             }
-          : undefined,
+          : {}),
       },
       include: getMessageInclude(),
     });
 
+    const readUpdateData = getConversationReadUpdateData(conversation, req.user.id);
     await prisma.conversation.update({
       where: { id },
       data: {
         updatedAt: new Date(),
-        ...getConversationReadUpdateData(conversation, req.user.id),
+        ...readUpdateData,
       },
     });
 
     const io = req.app.get('io');
-    io?.to(recipientId).emit('new_message', formatMessage(message, recipientId));
-    io?.to(recipientId).emit('conversation_updated', {
-      conversationId: id,
-      lastMessage: getMessagePreview(message, recipientId),
-      lastActivityAt: message.createdAt,
+    const conversationRoom = buildConversationRoom(id);
+
+    io?.to(req.user.id).emit('message_ack', {
+      clientTempId: clientTempId || null,
+      message: formatMessage(message, req.user.id),
     });
+    io?.to(conversationRoom).except(req.user.id).emit('new_message', formatMessage(message, null));
+    emitConversationActivity(io, id, message, req.user.id);
 
     res.status(201).json({
       message: formatMessage(message, req.user.id),
@@ -461,6 +713,10 @@ router.patch('/:conversationId/messages/:messageId', auth, async (req, res) => {
   try {
     const { conversationId, messageId } = req.params;
     const { content } = req.body;
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({ error: 'Message content is required.' });
+    }
 
     const conversation = await getConversationById(conversationId, req.user.id);
 
@@ -488,23 +744,17 @@ router.patch('/:conversationId/messages/:messageId', auth, async (req, res) => {
       return res.status(400).json({ error: 'Deleted messages cannot be edited.' });
     }
 
-    const normalizedContent = content?.trim() || '';
-
-    if (!normalizedContent && !existingMessage.attachments?.length) {
-      return res.status(400).json({ error: 'Message content is required.' });
-    }
-
     const message = await prisma.message.update({
       where: { id: messageId },
       data: {
-        content: normalizedContent || null,
+        content: content.trim(),
         editedAt: new Date(),
       },
       include: getMessageInclude(),
     });
 
     const io = req.app.get('io');
-    emitMessageUpdate(io, conversation, req.user.id, 'message_updated', message);
+    emitMessageUpdate(io, conversationId, 'message_updated', message, req.user.id);
 
     await prisma.conversation.update({
       where: { id: conversationId },
@@ -519,89 +769,12 @@ router.patch('/:conversationId/messages/:messageId', auth, async (req, res) => {
     });
 
     if (latestMessage?.id === message.id) {
-      const recipientId = getRecipientId(conversation, req.user.id);
-      io?.to(req.user.id).emit('conversation_updated', {
-        conversationId,
-        lastMessage: getMessagePreview(message, req.user.id),
-        lastActivityAt: message.createdAt,
-      });
-      io?.to(recipientId).emit('conversation_updated', {
-        conversationId,
-        lastMessage: getMessagePreview(message, recipientId),
-        lastActivityAt: message.createdAt,
-      });
+      emitConversationActivity(io, conversationId, message, req.user.id);
     }
 
     res.json({ message: formatMessage(message, req.user.id) });
   } catch (err) {
     console.error('Edit message error:', err);
-    res.status(500).json({ error: 'Server error. Please try again.' });
-  }
-});
-
-router.post('/:conversationId/messages/:messageId/reactions', auth, async (req, res) => {
-  try {
-    const { conversationId, messageId } = req.params;
-    const { emoji } = req.body;
-
-    if (!emoji?.trim()) {
-      return res.status(400).json({ error: 'Reaction emoji is required.' });
-    }
-
-    const conversation = await getConversationById(conversationId, req.user.id);
-
-    if (!conversation) {
-      return res.status(404).json({ error: 'Conversation not found.' });
-    }
-
-    const existingMessage = await prisma.message.findFirst({
-      where: {
-        id: messageId,
-        conversationId,
-      },
-      include: getMessageInclude(),
-    });
-
-    if (!existingMessage) {
-      return res.status(404).json({ error: 'Message not found.' });
-    }
-
-    const normalizedEmoji = emoji.trim().slice(0, 16);
-    const existingReaction = await prisma.reaction.findUnique({
-      where: {
-        messageId_userId_emoji: {
-          messageId,
-          userId: req.user.id,
-          emoji: normalizedEmoji,
-        },
-      },
-    });
-
-    if (existingReaction) {
-      await prisma.reaction.delete({
-        where: { id: existingReaction.id },
-      });
-    } else {
-      await prisma.reaction.create({
-        data: {
-          emoji: normalizedEmoji,
-          messageId,
-          userId: req.user.id,
-        },
-      });
-    }
-
-    const message = await prisma.message.findUnique({
-      where: { id: messageId },
-      include: getMessageInclude(),
-    });
-
-    const io = req.app.get('io');
-    emitMessageUpdate(io, conversation, req.user.id, 'message_updated', message);
-
-    res.json({ message: formatMessage(message, req.user.id) });
-  } catch (err) {
-    console.error('Toggle reaction error:', err);
     res.status(500).json({ error: 'Server error. Please try again.' });
   }
 });
@@ -645,7 +818,7 @@ router.delete('/:conversationId/messages/:messageId', auth, async (req, res) => 
     });
 
     const io = req.app.get('io');
-    emitMessageUpdate(io, conversation, req.user.id, 'message_deleted', message);
+    emitMessageUpdate(io, conversationId, 'message_deleted', message, req.user.id);
 
     const latestMessage = await prisma.message.findFirst({
       where: { conversationId },
@@ -653,19 +826,7 @@ router.delete('/:conversationId/messages/:messageId', auth, async (req, res) => 
     });
 
     if (latestMessage?.id === message.id) {
-      const preview = getMessagePreview(message, req.user.id);
-      io?.to(req.user.id).emit('conversation_updated', {
-        conversationId,
-        lastMessage: preview,
-        lastActivityAt: message.createdAt,
-      });
-
-      const recipientId = getRecipientId(conversation, req.user.id);
-      io?.to(recipientId).emit('conversation_updated', {
-        conversationId,
-        lastMessage: getMessagePreview(message, recipientId),
-        lastActivityAt: message.createdAt,
-      });
+      emitConversationActivity(io, conversationId, message, req.user.id);
     }
 
     res.json({ message: formatMessage(message, req.user.id) });

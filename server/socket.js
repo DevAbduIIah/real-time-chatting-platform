@@ -1,26 +1,40 @@
 const prisma = require('./lib/prisma');
-const { getConversationReadUpdateData } = require('./routes/conversation-helpers');
+const {
+  buildConversationRoom,
+  getConversationInclude,
+  getConversationReadUpdateData,
+} = require('./routes/conversation-helpers');
 const {
   formatMessage,
+  getConversationRecipientIds,
   getMessageInclude,
   getMessagePreview,
-  getRecipientId,
-  normalizeAttachmentIds,
-  resolvePendingAttachments,
 } = require('./routes/message-helpers');
 
 // Store connected users: { userId: socketId }
 const connectedUsers = new Map();
 
+function getConversationWhereForUser(userId) {
+  return {
+    OR: [
+      { user1Id: userId },
+      { user2Id: userId },
+      {
+        participants: {
+          some: { userId },
+        },
+      },
+    ],
+  };
+}
+
 async function getConversationForUser(conversationId, userId) {
   return prisma.conversation.findFirst({
     where: {
       id: conversationId,
-      OR: [
-        { user1Id: userId },
-        { user2Id: userId },
-      ],
+      ...getConversationWhereForUser(userId),
     },
+    include: getConversationInclude(),
   });
 }
 
@@ -40,6 +54,57 @@ async function getReplyMessage(replyToMessageId, conversationId) {
   });
 }
 
+async function validateAttachmentIds(attachmentIds, userId) {
+  const normalizedIds = Array.isArray(attachmentIds)
+    ? [...new Set(attachmentIds.filter(Boolean))]
+    : [];
+
+  if (normalizedIds.length === 0) {
+    return [];
+  }
+
+  const attachments = await prisma.attachment.findMany({
+    where: {
+      id: { in: normalizedIds },
+      uploadedById: userId,
+      messageId: null,
+    },
+  });
+
+  if (attachments.length !== normalizedIds.length) {
+    return null;
+  }
+
+  return attachments;
+}
+
+async function joinConversationRooms(socket, userId) {
+  const conversations = await prisma.conversation.findMany({
+    where: getConversationWhereForUser(userId),
+    select: { id: true },
+  });
+
+  conversations.forEach((conversation) => {
+    socket.join(buildConversationRoom(conversation.id));
+  });
+}
+
+function emitConversationActivity(io, conversationId, message, senderId) {
+  const conversationRoom = buildConversationRoom(conversationId);
+
+  io.to(senderId).emit('conversation_updated', {
+    conversationId,
+    lastMessage: getMessagePreview(message, senderId),
+    lastActivityAt: message.createdAt,
+  });
+
+  io.to(conversationRoom).except(senderId).emit('conversation_updated', {
+    conversationId,
+    lastMessage: getMessagePreview(message, null),
+    lastActivityAt: message.createdAt,
+  });
+}
+
 function setupSocketHandlers(io) {
   io.on('connection', (socket) => {
     const userId = socket.userId;
@@ -48,23 +113,19 @@ function setupSocketHandlers(io) {
     connectedUsers.set(userId, socket.id);
     socket.join(userId);
 
+    joinConversationRooms(socket, userId).catch((error) => {
+      console.error('Join conversation rooms error:', error);
+    });
+
     socket.broadcast.emit('user_online', { userId });
     socket.emit('online_users', { userIds: Array.from(connectedUsers.keys()) });
 
     socket.on('send_message', async (data) => {
-      const {
-        conversationId,
-        content,
-        clientTempId,
-        replyToMessageId,
-        attachmentIds,
-      } = data || {};
+      const { conversationId, content, clientTempId, replyToMessageId, attachmentIds } = data || {};
+      const trimmedContent = typeof content === 'string' ? content.trim() : '';
 
       try {
-        const normalizedContent = content?.trim() || '';
-        const normalizedAttachmentIds = normalizeAttachmentIds(attachmentIds);
-
-        if (!conversationId || (!normalizedContent && normalizedAttachmentIds.length === 0)) {
+        if (!conversationId || (!trimmedContent && (!Array.isArray(attachmentIds) || attachmentIds.length === 0))) {
           socket.emit('message_error', {
             clientTempId: clientTempId || null,
             error: 'Invalid message data.',
@@ -101,7 +162,6 @@ function setupSocketHandlers(io) {
         }
 
         const replyMessage = await getReplyMessage(replyToMessageId, conversationId);
-        const attachments = await resolvePendingAttachments(prisma, normalizedAttachmentIds, userId);
 
         if (replyToMessageId && !replyMessage) {
           socket.emit('message_error', {
@@ -111,7 +171,8 @@ function setupSocketHandlers(io) {
           return;
         }
 
-        if (attachments.length !== normalizedAttachmentIds.length) {
+        const validAttachments = await validateAttachmentIds(attachmentIds, userId);
+        if (attachmentIds?.length && !validAttachments) {
           socket.emit('message_error', {
             clientTempId: clientTempId || null,
             error: 'One or more attachments are invalid.',
@@ -119,31 +180,36 @@ function setupSocketHandlers(io) {
           return;
         }
 
-        const recipientId = getRecipientId(conversation, userId);
-        const deliveredAt = connectedUsers.has(recipientId) ? new Date() : null;
+        const recipientIds = getConversationRecipientIds(conversation, userId);
+        const deliveredAt = recipientIds.some((recipientId) => connectedUsers.has(recipientId))
+          ? new Date()
+          : null;
 
         const message = await prisma.message.create({
           data: {
-            content: normalizedContent || null,
+            content: trimmedContent,
             clientTempId: clientTempId || null,
             replyToMessageId: replyMessage?.id || null,
             deliveredAt,
             senderId: userId,
             conversationId,
-            attachments: normalizedAttachmentIds.length > 0
+            ...(validAttachments?.length
               ? {
-                  connect: attachments.map((attachment) => ({ id: attachment.id })),
+                  attachments: {
+                    connect: validAttachments.map((attachment) => ({ id: attachment.id })),
+                  },
                 }
-              : undefined,
+              : {}),
           },
           include: getMessageInclude(),
         });
 
+        const readUpdateData = getConversationReadUpdateData(conversation, userId);
         await prisma.conversation.update({
           where: { id: conversationId },
           data: {
             updatedAt: new Date(),
-            ...getConversationReadUpdateData(conversation, userId),
+            ...readUpdateData,
           },
         });
 
@@ -152,20 +218,8 @@ function setupSocketHandlers(io) {
           message: formatMessage(message, userId),
         });
 
-        io.to(userId).emit('conversation_updated', {
-          conversationId,
-          lastMessage: getMessagePreview(message, userId),
-          lastActivityAt: message.createdAt,
-        });
-
-        if (connectedUsers.has(recipientId)) {
-          io.to(recipientId).emit('new_message', formatMessage(message, recipientId));
-          io.to(recipientId).emit('conversation_updated', {
-            conversationId,
-            lastMessage: getMessagePreview(message, recipientId),
-            lastActivityAt: message.createdAt,
-          });
-        }
+        io.to(buildConversationRoom(conversationId)).except(userId).emit('new_message', formatMessage(message, null));
+        emitConversationActivity(io, conversationId, message, userId);
       } catch (err) {
         console.error('Send message error:', err);
         socket.emit('message_error', {
@@ -175,25 +229,47 @@ function setupSocketHandlers(io) {
       }
     });
 
-    socket.on('typing', (data) => {
-      const { conversationId, recipientId } = data || {};
+    socket.on('typing', async (data) => {
+      const { conversationId } = data || {};
 
-      if (connectedUsers.has(recipientId)) {
-        io.to(recipientId).emit('user_typing', {
+      if (!conversationId) {
+        return;
+      }
+
+      try {
+        const conversation = await getConversationForUser(conversationId, userId);
+        if (!conversation) {
+          return;
+        }
+
+        io.to(buildConversationRoom(conversationId)).except(userId).emit('user_typing', {
           conversationId,
           userId,
         });
+      } catch (error) {
+        console.error('Typing event error:', error);
       }
     });
 
-    socket.on('stop_typing', (data) => {
-      const { conversationId, recipientId } = data || {};
+    socket.on('stop_typing', async (data) => {
+      const { conversationId } = data || {};
 
-      if (connectedUsers.has(recipientId)) {
-        io.to(recipientId).emit('user_stop_typing', {
+      if (!conversationId) {
+        return;
+      }
+
+      try {
+        const conversation = await getConversationForUser(conversationId, userId);
+        if (!conversation) {
+          return;
+        }
+
+        io.to(buildConversationRoom(conversationId)).except(userId).emit('user_stop_typing', {
           conversationId,
           userId,
         });
+      } catch (error) {
+        console.error('Stop typing event error:', error);
       }
     });
 

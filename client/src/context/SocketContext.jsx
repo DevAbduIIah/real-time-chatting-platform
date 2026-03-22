@@ -83,15 +83,15 @@ export function SocketProvider({ children }) {
     }
   };
 
-  const sendTyping = (conversationId, recipientId) => {
+  const sendTyping = (conversationId) => {
     if (socket && isConnected) {
-      socket.emit('typing', { conversationId, recipientId });
+      socket.emit('typing', { conversationId });
     }
   };
 
-  const sendStopTyping = (conversationId, recipientId) => {
+  const sendStopTyping = (conversationId) => {
     if (socket && isConnected) {
-      socket.emit('stop_typing', { conversationId, recipientId });
+      socket.emit('stop_typing', { conversationId });
     }
   };
 

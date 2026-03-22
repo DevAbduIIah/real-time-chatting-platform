@@ -68,11 +68,13 @@ export const api = {
     uploadAvatar: (formData) => apiRequest('/users/me/avatar', { method: 'POST', body: formData }),
   },
   uploads: {
-    uploadAttachments: (formData) => apiRequest('/uploads/attachments', { method: 'POST', body: formData }),
+    uploadAttachment: (formData) => apiRequest('/uploads', { method: 'POST', body: formData }),
   },
   conversations: {
     getAll: () => apiRequest('/conversations'),
     create: (userId) => apiRequest('/conversations', { method: 'POST', body: JSON.stringify({ userId }) }),
+    createGroup: (data) => apiRequest('/conversations/group', { method: 'POST', body: JSON.stringify(data) }),
+    updateGroup: (id, data) => apiRequest(`/conversations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     getMessages: (id, params = {}) =>
       apiRequest(`/conversations/${id}/messages${buildQueryString(params)}`),
     markRead: (id) => apiRequest(`/conversations/${id}/read`, { method: 'POST' }),
@@ -85,11 +87,6 @@ export const api = {
     deleteMessage: (conversationId, messageId) =>
       apiRequest(`/conversations/${conversationId}/messages/${messageId}`, {
         method: 'DELETE',
-      }),
-    toggleReaction: (conversationId, messageId, emoji) =>
-      apiRequest(`/conversations/${conversationId}/messages/${messageId}/reactions`, {
-        method: 'POST',
-        body: JSON.stringify({ emoji }),
       }),
   },
 };

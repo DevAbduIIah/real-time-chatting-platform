@@ -1,44 +1,22 @@
-function getRecipientId(conversation, currentUserId) {
-  return conversation.user1Id === currentUserId
-    ? conversation.user2Id
-    : conversation.user1Id;
+const { getConversationParticipantIds } = require('./conversation-helpers');
+
+function getConversationRecipientIds(conversation, currentUserId) {
+  return getConversationParticipantIds(conversation)
+    .filter((userId) => userId !== currentUserId);
 }
 
-function normalizeAttachmentIds(attachmentIds) {
-  if (!Array.isArray(attachmentIds)) {
-    return [];
-  }
-
-  return [...new Set(attachmentIds.filter(Boolean))];
-}
-
-function orderAttachmentsByIds(attachments, attachmentIds) {
-  if (!attachmentIds.length) {
-    return attachments;
-  }
-
-  const attachmentMap = new Map(attachments.map((attachment) => [attachment.id, attachment]));
-  return attachmentIds
-    .map((attachmentId) => attachmentMap.get(attachmentId))
-    .filter(Boolean);
-}
-
-async function resolvePendingAttachments(prismaClient, attachmentIds, userId) {
-  const normalizedAttachmentIds = normalizeAttachmentIds(attachmentIds);
-
-  if (normalizedAttachmentIds.length === 0) {
-    return [];
-  }
-
-  const attachments = await prismaClient.attachment.findMany({
-    where: {
-      id: { in: normalizedAttachmentIds },
-      uploadedById: userId,
-      messageId: null,
+function getMessageInclude() {
+  return {
+    sender: { select: { id: true, name: true, avatarUrl: true } },
+    attachments: {
+      orderBy: { createdAt: 'asc' },
     },
-  });
-
-  return orderAttachmentsByIds(attachments, normalizedAttachmentIds);
+    replyToMessage: {
+      include: {
+        sender: { select: { id: true, name: true, avatarUrl: true } },
+      },
+    },
+  };
 }
 
 function formatAttachment(attachment) {
@@ -52,99 +30,14 @@ function formatAttachment(attachment) {
   };
 }
 
-function buildAttachmentSummaryText(attachments = []) {
-  if (!attachments.length) {
-    return '';
-  }
-
-  const imageCount = attachments.filter((attachment) => attachment.kind === 'image').length;
-  const fileCount = attachments.length - imageCount;
-
-  if (attachments.length === 1) {
-    return imageCount === 1 ? 'Sent an image' : 'Sent a file';
-  }
-
-  if (imageCount === attachments.length) {
-    return `Sent ${attachments.length} images`;
-  }
-
-  if (fileCount === attachments.length) {
-    return `Sent ${attachments.length} files`;
-  }
-
-  return `Sent ${attachments.length} attachments`;
-}
-
-function buildMessageDisplayText(message, currentUserId) {
-  if (message.deletedAt) {
-    return message.senderId === currentUserId
-      ? 'You deleted a message'
-      : 'Message deleted';
-  }
-
-  const trimmedContent = message.content?.trim();
-  if (trimmedContent) {
-    return trimmedContent;
-  }
-
-  return buildAttachmentSummaryText(message.attachments || []);
-}
-
-function formatReactions(reactions = [], currentUserId) {
-  const groupedReactions = new Map();
-
-  reactions.forEach((reaction) => {
-    const existingReaction = groupedReactions.get(reaction.emoji);
-
-    if (!existingReaction) {
-      groupedReactions.set(reaction.emoji, {
-        emoji: reaction.emoji,
-        count: 1,
-        reactedByMe: reaction.userId === currentUserId,
-      });
-      return;
-    }
-
-    existingReaction.count += 1;
-    existingReaction.reactedByMe = existingReaction.reactedByMe || reaction.userId === currentUserId;
-  });
-
-  return Array.from(groupedReactions.values()).sort((leftReaction, rightReaction) =>
-    leftReaction.emoji.localeCompare(rightReaction.emoji)
-  );
-}
-
-function getMessageInclude() {
-  return {
-    sender: { select: { id: true, name: true, avatarUrl: true } },
-    attachments: {
-      orderBy: { createdAt: 'asc' },
-    },
-    reactions: {
-      orderBy: [
-        { emoji: 'asc' },
-        { createdAt: 'asc' },
-      ],
-    },
-    replyToMessage: {
-      include: {
-        sender: { select: { id: true, name: true, avatarUrl: true } },
-        attachments: {
-          orderBy: { createdAt: 'asc' },
-        },
-      },
-    },
-  };
-}
-
-function formatReplyMessage(replyMessage, currentUserId) {
+function formatReplyMessage(replyMessage) {
   if (!replyMessage) {
     return null;
   }
 
   return {
     id: replyMessage.id,
-    content: replyMessage.deletedAt ? '' : buildMessageDisplayText(replyMessage, currentUserId),
+    content: replyMessage.deletedAt ? '' : replyMessage.content,
     deletedAt: replyMessage.deletedAt,
     senderId: replyMessage.senderId,
     senderName: replyMessage.sender?.name || 'Unknown user',
@@ -169,9 +62,20 @@ function formatReceiptStatus(message, isOwn) {
 }
 
 function getMessagePreview(message, currentUserId) {
+  const attachmentCount = message.attachments?.length || 0;
+  const attachmentLabel = attachmentCount > 0
+    ? message.attachments.some((attachment) => attachment.kind === 'image')
+      ? attachmentCount > 1 ? 'sent images' : 'sent an image'
+      : attachmentCount > 1 ? 'sent files' : 'sent a file'
+    : null;
+
   return {
     id: message.id,
-    content: buildMessageDisplayText(message, currentUserId),
+    content: message.deletedAt
+      ? message.senderId === currentUserId
+        ? 'You deleted a message'
+        : 'Message deleted'
+      : message.content || attachmentLabel || '',
     createdAt: message.createdAt,
     isOwn: message.senderId === currentUserId,
   };
@@ -179,12 +83,11 @@ function getMessagePreview(message, currentUserId) {
 
 function formatMessage(message, currentUserId) {
   const isOwn = message.senderId === currentUserId;
-  const previewText = buildMessageDisplayText(message, currentUserId);
 
   return {
     id: message.id,
     clientTempId: message.clientTempId || null,
-    content: message.deletedAt ? '' : (message.content || ''),
+    content: message.deletedAt ? '' : message.content,
     createdAt: message.createdAt,
     updatedAt: message.updatedAt || message.createdAt,
     editedAt: message.editedAt,
@@ -197,19 +100,14 @@ function formatMessage(message, currentUserId) {
     conversationId: message.conversationId,
     isOwn,
     status: formatReceiptStatus(message, isOwn),
-    previewText,
+    replyToMessage: formatReplyMessage(message.replyToMessage),
     attachments: (message.attachments || []).map(formatAttachment),
-    reactions: formatReactions(message.reactions || [], currentUserId),
-    replyToMessage: formatReplyMessage(message.replyToMessage, currentUserId),
   };
 }
 
 module.exports = {
-  buildAttachmentSummaryText,
   formatMessage,
+  getConversationRecipientIds,
   getMessageInclude,
   getMessagePreview,
-  getRecipientId,
-  normalizeAttachmentIds,
-  resolvePendingAttachments,
 };

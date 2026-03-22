@@ -1,92 +1,58 @@
 import { getAssetUrl } from '../lib/api';
-import { formatFileSize } from '../lib/formatters';
 
-function resolveAttachmentUrl(attachment) {
-  return getAssetUrl(attachment.previewUrl || attachment.url || null);
+function formatFileSize(size) {
+  if (!size) {
+    return '0 B';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = size;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value >= 10 || unitIndex === 0 ? Math.round(value) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
-function AttachmentPreview({ attachment, variant = 'message', onRemove = null }) {
-  const attachmentUrl = resolveAttachmentUrl(attachment);
-  const attachmentName = attachment.originalName || attachment.name || 'Attachment';
-  const attachmentSize = formatFileSize(attachment.size);
-  const isImage = attachment.kind === 'image';
+function AttachmentPreview({ attachment, compact = false }) {
+  const attachmentUrl = getAssetUrl(attachment.url);
 
-  if (isImage && attachmentUrl) {
-    if (variant === 'composer') {
-      return (
-        <div className="relative overflow-hidden rounded-2xl border theme-border">
-          <img
-            src={attachmentUrl}
-            alt={attachmentName}
-            className="h-24 w-24 object-cover"
-          />
-          {onRemove && (
-            <button
-              type="button"
-              onClick={onRemove}
-              className="absolute right-1 top-1 rounded-full bg-black/60 p-1 text-white transition hover:bg-black/75"
-            >
-              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          )}
-        </div>
-      );
-    }
-
+  if (attachment.kind === 'image') {
     return (
       <a
         href={attachmentUrl}
         target="_blank"
         rel="noreferrer"
-        className="block max-w-full overflow-hidden rounded-2xl border transition hover:opacity-95 theme-border"
+        className={`block overflow-hidden rounded-2xl ring-1 ring-white/10 ${compact ? 'max-w-[11rem]' : 'max-w-[22rem]'}`}
       >
         <img
           src={attachmentUrl}
-          alt={attachmentName}
-          className="block max-h-72 w-full max-w-full object-cover"
+          alt={attachment.originalName}
+          className={`w-full object-cover ${compact ? 'h-28' : 'max-h-80'}`}
         />
       </a>
     );
   }
 
-  const content = (
-    <div className={`theme-surface-muted theme-border flex items-center gap-3 rounded-2xl border px-3 py-2.5 ${
-      variant === 'composer' ? 'min-w-[12rem]' : ''
-    }`}>
-      <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl bg-indigo-500/10 text-indigo-600">
+  return (
+    <a
+      href={attachmentUrl}
+      target="_blank"
+      rel="noreferrer"
+      className="theme-surface-muted flex items-center gap-3 rounded-2xl px-3 py-3 ring-1 ring-[color:var(--border-subtle)] transition hover:bg-slate-200/60"
+    >
+      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-indigo-500/10 text-indigo-600">
         <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 7h10M7 11h10M7 15h6m-7 6h12a2 2 0 002-2V5a2 2 0 00-2-2H6a2 2 0 00-2 2v14a2 2 0 002 2z" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 7h10M7 11h10M7 15h6m5 6H6a2 2 0 01-2-2V5a2 2 0 012-2h7.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
         </svg>
       </div>
-      <div className="min-w-0 flex-1">
-        <p className="theme-text truncate text-sm font-medium">{attachmentName}</p>
-        <p className="theme-muted truncate text-xs">
-          {attachmentSize || attachment.mimeType || 'File'}
-        </p>
+      <div className="min-w-0">
+        <p className="theme-text truncate text-sm font-medium">{attachment.originalName}</p>
+        <p className="theme-muted text-xs">{formatFileSize(attachment.size)}</p>
       </div>
-      {onRemove && (
-        <button
-          type="button"
-          onClick={onRemove}
-          className="theme-muted rounded-full p-1 transition hover:bg-slate-200/70 hover:text-slate-700"
-        >
-          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
-      )}
-    </div>
-  );
-
-  if (!attachmentUrl || variant === 'composer') {
-    return content;
-  }
-
-  return (
-    <a href={attachmentUrl} target="_blank" rel="noreferrer" className="block max-w-full">
-      {content}
     </a>
   );
 }
