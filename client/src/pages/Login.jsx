@@ -26,17 +26,17 @@ function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-100 via-white to-purple-100 flex items-center justify-center p-4">
+    <div className="theme-gradient-page flex min-h-screen items-center justify-center p-4">
       <div className="w-full max-w-md">
-        <div className="bg-white rounded-2xl shadow-xl p-8">
+        <div className="theme-surface theme-border rounded-2xl border p-8 shadow-xl">
           <div className="text-center mb-8">
             <div className="inline-flex items-center justify-center w-16 h-16 bg-indigo-600 rounded-full mb-4">
               <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
               </svg>
             </div>
-            <h1 className="text-2xl font-bold text-gray-900">Welcome back</h1>
-            <p className="text-gray-500 mt-2">Sign in to continue to ChatApp</p>
+            <h1 className="theme-text text-2xl font-bold">Welcome back</h1>
+            <p className="theme-muted mt-2">Sign in to continue to ChatApp</p>
           </div>
 
           {error && (
@@ -47,7 +47,7 @@ function Login() {
 
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
+              <label htmlFor="email" className="theme-text mb-1 block text-sm font-medium">
                 Email address
               </label>
               <input
@@ -55,7 +55,7 @@ function Login() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition duration-200 outline-none"
+                className="theme-input w-full rounded-lg px-4 py-3 transition duration-200 outline-none"
                 placeholder="Enter your email"
                 required
                 disabled={loading}
@@ -63,7 +63,7 @@ function Login() {
             </div>
 
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
+              <label htmlFor="password" className="theme-text mb-1 block text-sm font-medium">
                 Password
               </label>
               <input
@@ -71,7 +71,7 @@ function Login() {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition duration-200 outline-none"
+                className="theme-input w-full rounded-lg px-4 py-3 transition duration-200 outline-none"
                 placeholder="Enter your password"
                 required
                 disabled={loading}
@@ -94,7 +94,7 @@ function Login() {
             </button>
           </form>
 
-          <p className="text-center mt-6 text-gray-600">
+          <p className="theme-muted mt-6 text-center">
             Don't have an account?{' '}
             <Link to="/register" className="text-indigo-600 font-medium hover:text-indigo-700 transition">
               Sign up

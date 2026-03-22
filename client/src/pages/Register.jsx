@@ -39,17 +39,17 @@ function Register() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-100 via-white to-purple-100 flex items-center justify-center p-4">
+    <div className="theme-gradient-page flex min-h-screen items-center justify-center p-4">
       <div className="w-full max-w-md">
-        <div className="bg-white rounded-2xl shadow-xl p-8">
+        <div className="theme-surface theme-border rounded-2xl border p-8 shadow-xl">
           <div className="text-center mb-8">
             <div className="inline-flex items-center justify-center w-16 h-16 bg-indigo-600 rounded-full mb-4">
               <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
               </svg>
             </div>
-            <h1 className="text-2xl font-bold text-gray-900">Create account</h1>
-            <p className="text-gray-500 mt-2">Join ChatApp today</p>
+            <h1 className="theme-text text-2xl font-bold">Create account</h1>
+            <p className="theme-muted mt-2">Join ChatApp today</p>
           </div>
 
           {error && (
@@ -60,7 +60,7 @@ function Register() {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-1">
+              <label htmlFor="name" className="theme-text mb-1 block text-sm font-medium">
                 Full name
               </label>
               <input
@@ -68,7 +68,7 @@ function Register() {
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition duration-200 outline-none"
+                className="theme-input w-full rounded-lg px-4 py-3 transition duration-200 outline-none"
                 placeholder="Enter your name"
                 required
                 disabled={loading}
@@ -76,7 +76,7 @@ function Register() {
             </div>
 
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
+              <label htmlFor="email" className="theme-text mb-1 block text-sm font-medium">
                 Email address
               </label>
               <input
@@ -84,7 +84,7 @@ function Register() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition duration-200 outline-none"
+                className="theme-input w-full rounded-lg px-4 py-3 transition duration-200 outline-none"
                 placeholder="Enter your email"
                 required
                 disabled={loading}
@@ -92,7 +92,7 @@ function Register() {
             </div>
 
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
+              <label htmlFor="password" className="theme-text mb-1 block text-sm font-medium">
                 Password
               </label>
               <input
@@ -100,7 +100,7 @@ function Register() {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition duration-200 outline-none"
+                className="theme-input w-full rounded-lg px-4 py-3 transition duration-200 outline-none"
                 placeholder="Create a password"
                 required
                 disabled={loading}
@@ -108,7 +108,7 @@ function Register() {
             </div>
 
             <div>
-              <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700 mb-1">
+              <label htmlFor="confirmPassword" className="theme-text mb-1 block text-sm font-medium">
                 Confirm password
               </label>
               <input
@@ -116,7 +116,7 @@ function Register() {
                 type="password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition duration-200 outline-none"
+                className="theme-input w-full rounded-lg px-4 py-3 transition duration-200 outline-none"
                 placeholder="Confirm your password"
                 required
                 disabled={loading}
@@ -139,7 +139,7 @@ function Register() {
             </button>
           </form>
 
-          <p className="text-center mt-6 text-gray-600">
+          <p className="theme-muted mt-6 text-center">
             Already have an account?{' '}
             <Link to="/login" className="text-indigo-600 font-medium hover:text-indigo-700 transition">
               Sign in

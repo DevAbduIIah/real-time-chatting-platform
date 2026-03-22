@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 import { useAuth } from './AuthContext';
@@ -14,42 +15,42 @@ export function SocketProvider({ children }) {
 
   useEffect(() => {
     if (!user) {
-      if (socket) {
-        socket.disconnect();
-        setSocket(null);
-        setIsConnected(false);
-      }
-      return;
+      return undefined;
     }
 
     const token = localStorage.getItem('token');
-    if (!token) return;
+    if (!token) {
+      return undefined;
+    }
 
-    const newSocket = io(SOCKET_URL, {
+    const nextSocket = io(SOCKET_URL, {
       auth: { token },
       reconnection: true,
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,
     });
 
-    newSocket.on('connect', () => {
+    nextSocket.on('connect', () => {
+      setSocket(nextSocket);
       setIsConnected(true);
     });
 
-    newSocket.on('disconnect', () => {
+    nextSocket.on('disconnect', () => {
+      setSocket(null);
       setIsConnected(false);
     });
 
-    newSocket.on('connect_error', (err) => {
+    nextSocket.on('connect_error', (err) => {
       console.error('Socket connection error:', err.message);
+      setSocket(null);
       setIsConnected(false);
     });
 
-    newSocket.on('online_users', (data) => {
+    nextSocket.on('online_users', (data) => {
       setOnlineUsers(new Set(data.userIds));
     });
 
-    newSocket.on('user_online', (data) => {
+    nextSocket.on('user_online', (data) => {
       setOnlineUsers((prev) => {
         const updated = new Set(prev);
         updated.add(data.userId);
@@ -57,7 +58,7 @@ export function SocketProvider({ children }) {
       });
     });
 
-    newSocket.on('user_offline', (data) => {
+    nextSocket.on('user_offline', (data) => {
       setOnlineUsers((prev) => {
         const updated = new Set(prev);
         updated.delete(data.userId);
@@ -65,10 +66,10 @@ export function SocketProvider({ children }) {
       });
     });
 
-    setSocket(newSocket);
-
     return () => {
-      newSocket.disconnect();
+      nextSocket.disconnect();
+      setIsConnected(false);
+      setOnlineUsers(new Set());
     };
   }, [user]);
 
@@ -76,9 +77,9 @@ export function SocketProvider({ children }) {
     return onlineUsers.has(userId);
   };
 
-  const sendMessage = (conversationId, content) => {
+  const sendMessage = (payload) => {
     if (socket && isConnected) {
-      socket.emit('send_message', { conversationId, content });
+      socket.emit('send_message', payload);
     }
   };
 

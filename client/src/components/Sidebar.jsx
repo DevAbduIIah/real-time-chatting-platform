@@ -1,7 +1,22 @@
 import { useNavigate } from 'react-router-dom';
 import { useSocket } from '../context/SocketContext';
+import UserAvatar from './UserAvatar';
+import EmptyState from './EmptyState';
+import { ConversationListSkeleton } from './LoadingSkeletons';
+import { formatConversationTime } from '../lib/formatters';
 
-function Sidebar({ users, selectedUser, onSelectUser, isOpen, onToggle, currentUser, onLogout }) {
+function Sidebar({
+  users,
+  selectedUserId,
+  onSelectUser,
+  isOpen,
+  onToggle,
+  currentUser,
+  onLogout,
+  isLoading,
+  searchQuery,
+  onSearchChange,
+}) {
   const navigate = useNavigate();
   const { isUserOnline } = useSocket();
 
@@ -10,138 +25,151 @@ function Sidebar({ users, selectedUser, onSelectUser, isOpen, onToggle, currentU
     navigate('/login');
   };
 
-  const getInitials = (name) => {
-    if (!name) return '?';
-    return name
-      .split(' ')
-      .map((n) => n[0])
-      .join('')
-      .toUpperCase();
-  };
-
-  const formatTime = (dateString) => {
-    if (!dateString) return '';
-    const date = new Date(dateString);
-    const now = new Date();
-    const diffDays = Math.floor((now - date) / (1000 * 60 * 60 * 24));
-
-    if (diffDays === 0) {
-      return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-    } else if (diffDays === 1) {
-      return 'Yesterday';
-    } else if (diffDays < 7) {
-      return date.toLocaleDateString('en-US', { weekday: 'short' });
-    } else {
-      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    }
-  };
-
   return (
     <>
-      {/* Mobile overlay */}
       {isOpen && (
         <div
-          className="fixed inset-0 bg-black/50 z-20 lg:hidden"
+          className="fixed inset-0 z-20 bg-black/50 lg:hidden"
           onClick={onToggle}
         />
       )}
 
-      {/* Sidebar */}
       <aside
         className={`
-          fixed lg:static inset-y-0 left-0 z-30
-          w-80 bg-white border-r border-gray-200
-          transform transition-transform duration-300 ease-in-out
+          theme-surface fixed inset-y-0 left-0 z-30 flex w-[21rem] max-w-[88vw] flex-col border-r shadow-xl theme-border
+          transform transition-transform duration-300 ease-in-out lg:static lg:shadow-none
           ${isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
-          flex flex-col
         `}
       >
-        {/* Header */}
-        <div className="p-4 border-b border-gray-200">
-          <div className="flex items-center justify-between">
-            <h1 className="text-xl font-bold text-gray-900">Messages</h1>
+        <div className="border-b px-4 pb-4 pt-5 theme-border">
+          <div>
+            <h1 className="theme-text text-xl font-bold">Messages</h1>
+            <p className="theme-muted mt-1 text-sm">
+              Stay on top of your latest conversations
+            </p>
           </div>
-          {/* Search */}
-          <div className="mt-4 relative">
+
+          <div className="relative mt-4">
             <input
               type="text"
+              value={searchQuery}
+              onChange={(event) => onSearchChange(event.target.value)}
               placeholder="Search conversations..."
-              className="w-full pl-10 pr-4 py-2.5 bg-gray-100 rounded-lg border-0 focus:ring-2 focus:ring-indigo-500 outline-none transition"
+              className="theme-input w-full rounded-xl py-2.5 pl-10 pr-4 text-sm outline-none transition"
             />
             <svg
-              className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400"
+              className="theme-muted absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
             >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-4.35-4.35m1.6-5.15a6.75 6.75 0 11-13.5 0 6.75 6.75 0 0113.5 0z" />
             </svg>
           </div>
         </div>
 
-        {/* Conversation list */}
         <div className="flex-1 overflow-y-auto">
-          {users.length === 0 ? (
-            <div className="p-4 text-center text-gray-500">
-              <p>No users available</p>
-            </div>
+          {isLoading ? (
+            <ConversationListSkeleton />
+          ) : users.length === 0 ? (
+            <EmptyState
+              title={searchQuery ? 'No users found' : 'No conversations yet'}
+              description={
+                searchQuery
+                  ? 'Try a different name or email to find the conversation you want.'
+                  : 'When more people join, their conversations will show up here.'
+              }
+              icon={(
+                <svg className="h-8 w-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.75" d="M21 21l-4.35-4.35m1.6-5.15a6.75 6.75 0 11-13.5 0 6.75 6.75 0 0113.5 0z" />
+                </svg>
+              )}
+            />
           ) : (
-            users.map((user) => (
-              <button
-                key={user.id}
-                onClick={() => onSelectUser(user)}
-                className={`
-                  w-full p-4 flex items-center gap-3 hover:bg-gray-50 transition
-                  ${selectedUser?.id === user.id ? 'bg-indigo-50 border-r-2 border-indigo-600' : ''}
-                `}
-              >
-                {/* Avatar */}
-                <div className="relative flex-shrink-0">
-                  <div className="w-12 h-12 rounded-full bg-gradient-to-br from-indigo-400 to-purple-500 flex items-center justify-center text-white font-medium">
-                    {getInitials(user.name)}
-                  </div>
-                  {isUserOnline(user.id) && (
-                    <div className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-green-500 border-2 border-white rounded-full" />
-                  )}
-                </div>
+            <div className="space-y-1 p-3">
+              {users.map((user) => (
+                <button
+                  key={user.id}
+                  onClick={() => onSelectUser(user)}
+                  className={`
+                    w-full rounded-2xl px-3 py-3 text-left transition
+                    hover:bg-white/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/20
+                    ${selectedUserId === user.id ? 'bg-indigo-500/10 ring-1 ring-indigo-400/20' : ''}
+                  `}
+                >
+                  <div className="flex items-center gap-3">
+                    <UserAvatar
+                      name={user.name}
+                      avatarUrl={user.avatarUrl}
+                      isOnline={isUserOnline(user.id)}
+                      showStatus
+                      size="lg"
+                    />
 
-                {/* Content */}
-                <div className="flex-1 min-w-0 text-left">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium text-gray-900 truncate">{user.name}</span>
-                    {user.lastMessageTime && (
-                      <span className="text-xs text-gray-500 flex-shrink-0 ml-2">
-                        {formatTime(user.lastMessageTime)}
-                      </span>
-                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between">
+                        <span className="theme-text truncate font-semibold">{user.name}</span>
+                        {user.lastActivityAt && (
+                          <span className="theme-muted ml-2 flex-shrink-0 text-xs font-medium">
+                            {formatConversationTime(user.lastActivityAt)}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="mt-1 flex items-center gap-2">
+                        <p className="theme-muted min-w-0 flex-1 truncate text-sm">
+                          {user.lastMessage
+                            ? `${user.lastMessageIsOwn ? 'You: ' : ''}${user.lastMessage}`
+                            : user.hasConversation
+                              ? 'No messages yet'
+                              : 'Start a conversation'}
+                        </p>
+                        {user.unreadCount > 0 && (
+                          <span className="inline-flex min-w-[1.5rem] items-center justify-center rounded-full bg-indigo-600 px-2 py-0.5 text-xs font-semibold text-white">
+                            {user.unreadCount}
+                          </span>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  <p className="text-sm text-gray-500 truncate mt-1">
-                    {user.lastMessage || (user.hasConversation ? 'No messages yet' : 'Start a conversation')}
-                  </p>
-                </div>
-              </button>
-            ))
+                </button>
+              ))}
+            </div>
           )}
         </div>
 
-        {/* Current user */}
-        <div className="p-4 border-t border-gray-200 bg-gray-50">
+        <div className="theme-surface-muted border-t p-4 theme-border">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-medium text-sm">
-              {currentUser ? getInitials(currentUser.name) : '?'}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="font-medium text-gray-900 truncate">
+            <UserAvatar
+              name={currentUser?.name}
+              avatarUrl={currentUser?.avatarUrl}
+              isOnline
+              showStatus
+              size="md"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="theme-text truncate font-medium">
                 {currentUser?.name || 'User'}
               </p>
-              <p className="text-sm text-gray-500">Online</p>
+              <p className="theme-muted truncate text-sm">
+                {currentUser?.statusText || currentUser?.email || 'Online'}
+              </p>
             </div>
             <button
+              onClick={() => navigate('/settings')}
+              className="rounded-full p-2 transition hover:bg-slate-200/70"
+              title="Profile settings"
+            >
+              <svg className="theme-muted h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11.983 5.5a2 2 0 100 4 2 2 0 000-4zM11.983 14.5a2 2 0 100 4 2 2 0 000-4zM5.5 11.983a2 2 0 104 0 2 2 0 00-4 0zM14.5 11.983a2 2 0 104 0 2 2 0 00-4 0z" />
+              </svg>
+            </button>
+            <button
               onClick={handleLogout}
-              className="p-2 hover:bg-gray-200 rounded-full transition"
+              className="rounded-full p-2 transition hover:bg-slate-200/70"
               title="Logout"
             >
-              <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="theme-muted h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
               </svg>
             </button>

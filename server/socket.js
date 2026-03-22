@@ -1,108 +1,158 @@
 const prisma = require('./lib/prisma');
+const { getConversationReadUpdateData } = require('./routes/conversation-helpers');
+const {
+  formatMessage,
+  getMessageInclude,
+  getMessagePreview,
+  getRecipientId,
+} = require('./routes/message-helpers');
 
-// Store connected users: { oderId: socketId }
+// Store connected users: { userId: socketId }
 const connectedUsers = new Map();
+
+async function getConversationForUser(conversationId, userId) {
+  return prisma.conversation.findFirst({
+    where: {
+      id: conversationId,
+      OR: [
+        { user1Id: userId },
+        { user2Id: userId },
+      ],
+    },
+  });
+}
+
+async function getReplyMessage(replyToMessageId, conversationId) {
+  if (!replyToMessageId) {
+    return null;
+  }
+
+  return prisma.message.findFirst({
+    where: {
+      id: replyToMessageId,
+      conversationId,
+    },
+    include: {
+      sender: { select: { id: true, name: true } },
+    },
+  });
+}
 
 function setupSocketHandlers(io) {
   io.on('connection', (socket) => {
     const userId = socket.userId;
     console.log(`User connected: ${userId}`);
 
-    // Store user's socket connection
     connectedUsers.set(userId, socket.id);
-
-    // Join user to their own room for direct messaging
     socket.join(userId);
 
-    // Broadcast user online status
     socket.broadcast.emit('user_online', { userId });
+    socket.emit('online_users', { userIds: Array.from(connectedUsers.keys()) });
 
-    // Send list of currently online users to the newly connected user
-    const onlineUserIds = Array.from(connectedUsers.keys());
-    socket.emit('online_users', { userIds: onlineUserIds });
-
-    // Handle sending messages
     socket.on('send_message', async (data) => {
-      try {
-        const { conversationId, content } = data;
+      const { conversationId, content, clientTempId, replyToMessageId } = data || {};
 
+      try {
         if (!conversationId || !content?.trim()) {
-          socket.emit('error', { message: 'Invalid message data' });
+          socket.emit('message_error', {
+            clientTempId: clientTempId || null,
+            error: 'Invalid message data.',
+          });
           return;
         }
 
-        // Verify user is part of the conversation
-        const conversation = await prisma.conversation.findFirst({
-          where: {
-            id: conversationId,
-            OR: [
-              { user1Id: userId },
-              { user2Id: userId },
-            ],
-          },
-        });
+        const conversation = await getConversationForUser(conversationId, userId);
 
         if (!conversation) {
-          socket.emit('error', { message: 'Conversation not found' });
+          socket.emit('message_error', {
+            clientTempId: clientTempId || null,
+            error: 'Conversation not found.',
+          });
           return;
         }
 
-        // Create the message
+        if (clientTempId) {
+          const existingMessage = await prisma.message.findFirst({
+            where: {
+              senderId: userId,
+              clientTempId,
+            },
+            include: getMessageInclude(),
+          });
+
+          if (existingMessage) {
+            socket.emit('message_ack', {
+              clientTempId,
+              message: formatMessage(existingMessage, userId),
+            });
+            return;
+          }
+        }
+
+        const replyMessage = await getReplyMessage(replyToMessageId, conversationId);
+
+        if (replyToMessageId && !replyMessage) {
+          socket.emit('message_error', {
+            clientTempId: clientTempId || null,
+            error: 'Reply target not found.',
+          });
+          return;
+        }
+
+        const recipientId = getRecipientId(conversation, userId);
+        const deliveredAt = connectedUsers.has(recipientId) ? new Date() : null;
+
         const message = await prisma.message.create({
           data: {
             content: content.trim(),
+            clientTempId: clientTempId || null,
+            replyToMessageId: replyMessage?.id || null,
+            deliveredAt,
             senderId: userId,
             conversationId,
           },
-          include: {
-            sender: { select: { id: true, name: true } },
+          include: getMessageInclude(),
+        });
+
+        await prisma.conversation.update({
+          where: { id: conversationId },
+          data: {
+            updatedAt: new Date(),
+            ...getConversationReadUpdateData(conversation, userId),
           },
         });
 
-        // Update conversation timestamp
-        await prisma.conversation.update({
-          where: { id: conversationId },
-          data: { updatedAt: new Date() },
+        socket.emit('message_ack', {
+          clientTempId: clientTempId || null,
+          message: formatMessage(message, userId),
         });
 
-        // Format the message for clients
-        const formattedMessage = {
-          id: message.id,
-          content: message.content,
-          createdAt: message.createdAt,
-          senderId: message.senderId,
-          senderName: message.sender.name,
+        io.to(userId).emit('conversation_updated', {
           conversationId,
-        };
-
-        // Determine the recipient
-        const recipientId = conversation.user1Id === userId
-          ? conversation.user2Id
-          : conversation.user1Id;
-
-        // Send to sender (mark as own)
-        socket.emit('new_message', {
-          ...formattedMessage,
-          isOwn: true,
+          lastMessage: getMessagePreview(message, userId),
+          lastActivityAt: message.createdAt,
         });
 
-        // Send to recipient if online (mark as not own)
         if (connectedUsers.has(recipientId)) {
-          io.to(recipientId).emit('new_message', {
-            ...formattedMessage,
-            isOwn: false,
+          io.to(recipientId).emit('new_message', formatMessage(message, recipientId));
+          io.to(recipientId).emit('conversation_updated', {
+            conversationId,
+            lastMessage: getMessagePreview(message, recipientId),
+            lastActivityAt: message.createdAt,
           });
         }
-
       } catch (err) {
         console.error('Send message error:', err);
-        socket.emit('error', { message: 'Failed to send message' });
+        socket.emit('message_error', {
+          clientTempId: clientTempId || null,
+          error: 'Failed to send message.',
+        });
       }
     });
 
-    // Handle user typing indicator
     socket.on('typing', (data) => {
-      const { conversationId, recipientId } = data;
+      const { conversationId, recipientId } = data || {};
+
       if (connectedUsers.has(recipientId)) {
         io.to(recipientId).emit('user_typing', {
           conversationId,
@@ -111,9 +161,9 @@ function setupSocketHandlers(io) {
       }
     });
 
-    // Handle user stopped typing
     socket.on('stop_typing', (data) => {
-      const { conversationId, recipientId } = data;
+      const { conversationId, recipientId } = data || {};
+
       if (connectedUsers.has(recipientId)) {
         io.to(recipientId).emit('user_stop_typing', {
           conversationId,
@@ -122,12 +172,15 @@ function setupSocketHandlers(io) {
       }
     });
 
-    // Handle disconnect
     socket.on('disconnect', () => {
       console.log(`User disconnected: ${userId}`);
       connectedUsers.delete(userId);
-
-      // Broadcast user offline status
+      prisma.user.update({
+        where: { id: userId },
+        data: { lastSeenAt: new Date() },
+      }).catch((error) => {
+        console.error('Update last seen error:', error);
+      });
       socket.broadcast.emit('user_offline', { userId });
     });
   });
