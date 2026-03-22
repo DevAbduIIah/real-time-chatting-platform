@@ -42,7 +42,7 @@ function buildConversationPreview(message, currentUserId) {
       ? message.senderId === currentUserId
         ? 'You deleted a message'
         : 'Message deleted'
-      : message.content,
+      : message.previewText || message.content,
     createdAt: message.createdAt,
     isOwn: message.senderId === currentUserId,
   };
@@ -59,7 +59,12 @@ function doesMessageMatchSearch(message, searchTerm) {
     return false;
   }
 
-  return (message.content || '').toLowerCase().includes(normalizedSearchTerm);
+  const searchableText = [message.content, message.previewText]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  return searchableText.includes(normalizedSearchTerm);
 }
 
 function upsertVisibleMessage(messageList, nextMessage, searchTerm) {
@@ -491,20 +496,41 @@ function Chat() {
     selectedConversationId,
   ]);
 
-  const sendNewMessage = useCallback(async ({ content, replyMessage, existingFailedMessage = null }) => {
+  const sendNewMessage = useCallback(async ({
+    content,
+    replyMessage,
+    attachments = [],
+    existingFailedMessage = null,
+  }) => {
     if (!selectedConversation) {
       return;
     }
 
     const trimmedContent = content.trim();
-    if (!trimmedContent) {
+    const existingAttachments = existingFailedMessage?.attachments || [];
+    const hasAttachments = attachments.length > 0 || existingAttachments.length > 0;
+
+    if (!trimmedContent && !hasAttachments) {
       return;
+    }
+
+    let uploadedAttachments = existingAttachments;
+
+    if (!existingFailedMessage && attachments.length > 0) {
+      const formData = new FormData();
+      attachments.forEach((attachment) => {
+        formData.append('files', attachment);
+      });
+
+      const uploadResponse = await api.uploads.uploadAttachments(formData);
+      uploadedAttachments = uploadResponse.attachments;
     }
 
     const pendingMessage = existingFailedMessage
       ? {
           ...existingFailedMessage,
           content: trimmedContent,
+          previewText: trimmedContent || existingFailedMessage.previewText,
           status: 'pending',
         }
       : createPendingMessage({
@@ -512,6 +538,7 @@ function Chat() {
           conversationId: selectedConversation.id,
           user,
           replyToMessage: replyMessage,
+          attachments: uploadedAttachments,
         });
 
     setMessages((prev) => {
@@ -528,6 +555,7 @@ function Chat() {
       content: trimmedContent,
       clientTempId: pendingMessage.clientTempId,
       replyToMessageId: replyMessage?.id || null,
+      attachmentIds: uploadedAttachments.map((attachment) => attachment.id),
     };
 
     setReplyToMessage(null);
@@ -557,6 +585,7 @@ function Chat() {
         ))
       );
       console.error('Error sending message:', err);
+      throw err;
     }
   }, [
     applyConversationMessage,
@@ -570,7 +599,7 @@ function Chat() {
     user,
   ]);
 
-  const handleSubmitMessage = async (content) => {
+  const handleSubmitMessage = async ({ content, attachments }) => {
     if (!selectedConversation) {
       return;
     }
@@ -593,6 +622,7 @@ function Chat() {
         setEditingMessageId(null);
       } catch (err) {
         console.error('Error editing message:', err);
+        throw err;
       }
 
       return;
@@ -600,6 +630,7 @@ function Chat() {
 
     await sendNewMessage({
       content,
+      attachments,
       replyMessage: replyToMessage,
     });
   };
@@ -644,9 +675,25 @@ function Chat() {
   const handleRetryMessage = async (message) => {
     await sendNewMessage({
       content: message.content,
+      attachments: [],
       replyMessage: message.replyToMessage,
       existingFailedMessage: message,
     });
+  };
+
+  const handleToggleReaction = async (message, emoji) => {
+    if (!selectedConversation) {
+      return;
+    }
+
+    try {
+      const data = await api.conversations.toggleReaction(selectedConversation.id, message.id, emoji);
+      setMessages((prev) =>
+        upsertVisibleMessage(prev, data.message, normalizedMessageSearchQuery)
+      );
+    } catch (err) {
+      console.error('Error toggling reaction:', err);
+    }
   };
 
   const sidebarItems = useMemo(() => {
@@ -792,6 +839,7 @@ function Chat() {
               onEdit={handleEditMessage}
               onDelete={handleDeleteMessage}
               onRetry={handleRetryMessage}
+              onToggleReaction={handleToggleReaction}
             />
             <MessageInput
               key={`composer-${selectedConversationId}-${editingMessage?.id || 'new'}`}

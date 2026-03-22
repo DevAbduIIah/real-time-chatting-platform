@@ -5,6 +5,8 @@ const {
   getMessageInclude,
   getMessagePreview,
   getRecipientId,
+  normalizeAttachmentIds,
+  resolvePendingAttachments,
 } = require('./routes/message-helpers');
 
 // Store connected users: { userId: socketId }
@@ -50,10 +52,19 @@ function setupSocketHandlers(io) {
     socket.emit('online_users', { userIds: Array.from(connectedUsers.keys()) });
 
     socket.on('send_message', async (data) => {
-      const { conversationId, content, clientTempId, replyToMessageId } = data || {};
+      const {
+        conversationId,
+        content,
+        clientTempId,
+        replyToMessageId,
+        attachmentIds,
+      } = data || {};
 
       try {
-        if (!conversationId || !content?.trim()) {
+        const normalizedContent = content?.trim() || '';
+        const normalizedAttachmentIds = normalizeAttachmentIds(attachmentIds);
+
+        if (!conversationId || (!normalizedContent && normalizedAttachmentIds.length === 0)) {
           socket.emit('message_error', {
             clientTempId: clientTempId || null,
             error: 'Invalid message data.',
@@ -90,6 +101,7 @@ function setupSocketHandlers(io) {
         }
 
         const replyMessage = await getReplyMessage(replyToMessageId, conversationId);
+        const attachments = await resolvePendingAttachments(prisma, normalizedAttachmentIds, userId);
 
         if (replyToMessageId && !replyMessage) {
           socket.emit('message_error', {
@@ -99,17 +111,30 @@ function setupSocketHandlers(io) {
           return;
         }
 
+        if (attachments.length !== normalizedAttachmentIds.length) {
+          socket.emit('message_error', {
+            clientTempId: clientTempId || null,
+            error: 'One or more attachments are invalid.',
+          });
+          return;
+        }
+
         const recipientId = getRecipientId(conversation, userId);
         const deliveredAt = connectedUsers.has(recipientId) ? new Date() : null;
 
         const message = await prisma.message.create({
           data: {
-            content: content.trim(),
+            content: normalizedContent || null,
             clientTempId: clientTempId || null,
             replyToMessageId: replyMessage?.id || null,
             deliveredAt,
             senderId: userId,
             conversationId,
+            attachments: normalizedAttachmentIds.length > 0
+              ? {
+                  connect: attachments.map((attachment) => ({ id: attachment.id })),
+                }
+              : undefined,
           },
           include: getMessageInclude(),
         });

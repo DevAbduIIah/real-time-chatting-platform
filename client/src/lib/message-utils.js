@@ -6,14 +6,39 @@ export function createClientTempId() {
   return `temp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-export function createPendingMessage({ content, conversationId, user, replyToMessage }) {
+function buildAttachmentSummaryText(attachments = []) {
+  if (!attachments.length) {
+    return '';
+  }
+
+  const imageCount = attachments.filter((attachment) => attachment.kind === 'image').length;
+  const fileCount = attachments.length - imageCount;
+
+  if (attachments.length === 1) {
+    return imageCount === 1 ? 'Sent an image' : 'Sent a file';
+  }
+
+  if (imageCount === attachments.length) {
+    return `Sent ${attachments.length} images`;
+  }
+
+  if (fileCount === attachments.length) {
+    return `Sent ${attachments.length} files`;
+  }
+
+  return `Sent ${attachments.length} attachments`;
+}
+
+export function createPendingMessage({ content, conversationId, user, replyToMessage, attachments = [] }) {
   const clientTempId = createClientTempId();
   const createdAt = new Date().toISOString();
+  const trimmedContent = content.trim();
+  const previewText = trimmedContent || buildAttachmentSummaryText(attachments);
 
   return {
     id: clientTempId,
     clientTempId,
-    content,
+    content: trimmedContent,
     createdAt,
     updatedAt: createdAt,
     editedAt: null,
@@ -25,10 +50,13 @@ export function createPendingMessage({ content, conversationId, user, replyToMes
     conversationId,
     isOwn: true,
     status: 'pending',
+    previewText,
+    attachments,
+    reactions: [],
     replyToMessage: replyToMessage
       ? {
           id: replyToMessage.id,
-          content: replyToMessage.content,
+          content: replyToMessage.previewText || replyToMessage.content,
           deletedAt: replyToMessage.deletedAt,
           senderId: replyToMessage.senderId,
           senderName: replyToMessage.senderName,

@@ -13,6 +13,8 @@ const {
   getMessageInclude,
   getMessagePreview,
   getRecipientId,
+  normalizeAttachmentIds,
+  resolvePendingAttachments,
 } = require('./message-helpers');
 
 const router = express.Router();
@@ -368,9 +370,11 @@ router.post('/:id/read', auth, async (req, res) => {
 router.post('/:id/messages', auth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { content, clientTempId, replyToMessageId } = req.body;
+    const { content, clientTempId, replyToMessageId, attachmentIds } = req.body;
+    const normalizedContent = content?.trim() || '';
+    const normalizedAttachmentIds = normalizeAttachmentIds(attachmentIds);
 
-    if (!content || !content.trim()) {
+    if (!normalizedContent && normalizedAttachmentIds.length === 0) {
       return res.status(400).json({ error: 'Message content is required.' });
     }
 
@@ -397,9 +401,14 @@ router.post('/:id/messages', auth, async (req, res) => {
     }
 
     const replyToMessage = await validateReplyTarget(replyToMessageId, id);
+    const attachments = await resolvePendingAttachments(prisma, normalizedAttachmentIds, req.user.id);
 
     if (replyToMessageId && !replyToMessage) {
       return res.status(400).json({ error: 'Reply target not found.' });
+    }
+
+    if (attachments.length !== normalizedAttachmentIds.length) {
+      return res.status(400).json({ error: 'One or more attachments are invalid.' });
     }
 
     const recipientId = getRecipientId(conversation, req.user.id);
@@ -407,12 +416,17 @@ router.post('/:id/messages', auth, async (req, res) => {
 
     const message = await prisma.message.create({
       data: {
-        content: content.trim(),
+        content: normalizedContent || null,
         clientTempId: clientTempId || null,
         replyToMessageId: replyToMessage?.id || null,
         deliveredAt,
         senderId: req.user.id,
         conversationId: id,
+        attachments: normalizedAttachmentIds.length > 0
+          ? {
+              connect: attachments.map((attachment) => ({ id: attachment.id })),
+            }
+          : undefined,
       },
       include: getMessageInclude(),
     });
@@ -448,10 +462,6 @@ router.patch('/:conversationId/messages/:messageId', auth, async (req, res) => {
     const { conversationId, messageId } = req.params;
     const { content } = req.body;
 
-    if (!content || !content.trim()) {
-      return res.status(400).json({ error: 'Message content is required.' });
-    }
-
     const conversation = await getConversationById(conversationId, req.user.id);
 
     if (!conversation) {
@@ -478,10 +488,16 @@ router.patch('/:conversationId/messages/:messageId', auth, async (req, res) => {
       return res.status(400).json({ error: 'Deleted messages cannot be edited.' });
     }
 
+    const normalizedContent = content?.trim() || '';
+
+    if (!normalizedContent && !existingMessage.attachments?.length) {
+      return res.status(400).json({ error: 'Message content is required.' });
+    }
+
     const message = await prisma.message.update({
       where: { id: messageId },
       data: {
-        content: content.trim(),
+        content: normalizedContent || null,
         editedAt: new Date(),
       },
       include: getMessageInclude(),
@@ -519,6 +535,73 @@ router.patch('/:conversationId/messages/:messageId', auth, async (req, res) => {
     res.json({ message: formatMessage(message, req.user.id) });
   } catch (err) {
     console.error('Edit message error:', err);
+    res.status(500).json({ error: 'Server error. Please try again.' });
+  }
+});
+
+router.post('/:conversationId/messages/:messageId/reactions', auth, async (req, res) => {
+  try {
+    const { conversationId, messageId } = req.params;
+    const { emoji } = req.body;
+
+    if (!emoji?.trim()) {
+      return res.status(400).json({ error: 'Reaction emoji is required.' });
+    }
+
+    const conversation = await getConversationById(conversationId, req.user.id);
+
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found.' });
+    }
+
+    const existingMessage = await prisma.message.findFirst({
+      where: {
+        id: messageId,
+        conversationId,
+      },
+      include: getMessageInclude(),
+    });
+
+    if (!existingMessage) {
+      return res.status(404).json({ error: 'Message not found.' });
+    }
+
+    const normalizedEmoji = emoji.trim().slice(0, 16);
+    const existingReaction = await prisma.reaction.findUnique({
+      where: {
+        messageId_userId_emoji: {
+          messageId,
+          userId: req.user.id,
+          emoji: normalizedEmoji,
+        },
+      },
+    });
+
+    if (existingReaction) {
+      await prisma.reaction.delete({
+        where: { id: existingReaction.id },
+      });
+    } else {
+      await prisma.reaction.create({
+        data: {
+          emoji: normalizedEmoji,
+          messageId,
+          userId: req.user.id,
+        },
+      });
+    }
+
+    const message = await prisma.message.findUnique({
+      where: { id: messageId },
+      include: getMessageInclude(),
+    });
+
+    const io = req.app.get('io');
+    emitMessageUpdate(io, conversation, req.user.id, 'message_updated', message);
+
+    res.json({ message: formatMessage(message, req.user.id) });
+  } catch (err) {
+    console.error('Toggle reaction error:', err);
     res.status(500).json({ error: 'Server error. Please try again.' });
   }
 });

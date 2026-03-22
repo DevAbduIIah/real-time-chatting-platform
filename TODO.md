@@ -143,22 +143,22 @@ Expand the app beyond text-only chat.
 
 ### Tasks
 
-- Add **file sharing**
-- Add **image sharing**
-- Show file/image previews inside messages
-- Add upload validation
-  - File size limit
-  - Allowed file types
-- Store uploaded files safely
-- Add **message reactions**
-- Add optional **copy message** action
-- Add optional **link detection**
-  - Clickable URLs in messages
+- [x] Add **file sharing**
+- [x] Add **image sharing**
+- [x] Show file/image previews inside messages
+- [x] Add upload validation
+  - [x] File size limit
+  - [x] Allowed file types
+- [x] Store uploaded files safely
+- [x] Add **message reactions**
+- [x] Add optional **copy message** action
+- [x] Add optional **link detection**
+  - [x] Clickable URLs in messages
 
 ### Done When
 
-- The app supports richer communication
-- Messages feel more dynamic and practical
+- [x] The app supports richer communication
+- [x] Messages feel more dynamic and practical
 
 ---
 

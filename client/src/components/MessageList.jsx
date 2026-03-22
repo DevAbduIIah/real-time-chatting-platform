@@ -2,10 +2,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import EmptyState from './EmptyState';
 import { MessageListSkeleton } from './LoadingSkeletons';
 import UserAvatar from './UserAvatar';
+import AttachmentPreview from './AttachmentPreview';
 import {
   formatMessageDateLabel,
   formatMessageTime,
 } from '../lib/formatters';
+
+const QUICK_REACTIONS = ['👍', '❤️', '😂', '🔥', '🎉', '😮'];
+const URL_PATTERN = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
 
 function getReceiptLabel(message) {
   if (!message.isOwn) {
@@ -78,6 +82,63 @@ function renderHighlightedText(content, searchQuery) {
   ));
 }
 
+function normalizeHref(value) {
+  try {
+    const candidate = value.startsWith('www.') ? `https://${value}` : value;
+    const url = new URL(candidate);
+
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      return null;
+    }
+
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function renderMessageContent(content, searchQuery) {
+  URL_PATTERN.lastIndex = 0;
+  const parts = content.split(URL_PATTERN);
+
+  return parts.map((part, index) => {
+    if (!part) {
+      return null;
+    }
+
+    const href = normalizeHref(part);
+    if (!href) {
+      return <span key={`${part}-${index}`}>{renderHighlightedText(part, searchQuery)}</span>;
+    }
+
+    return (
+      <a
+        key={`${part}-${index}`}
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        className="font-medium underline decoration-current/40 underline-offset-4 transition hover:decoration-current"
+      >
+        {renderHighlightedText(part, searchQuery)}
+      </a>
+    );
+  });
+}
+
+function buildCopyText(message) {
+  if (message.content?.trim()) {
+    return message.content.trim();
+  }
+
+  if (message.attachments?.length) {
+    return message.attachments
+      .map((attachment) => attachment.url || attachment.originalName)
+      .join('\n');
+  }
+
+  return message.previewText || '';
+}
+
 function MessageList({
   messages,
   isTyping,
@@ -91,6 +152,7 @@ function MessageList({
   onEdit,
   onDelete,
   onRetry,
+  onToggleReaction,
 }) {
   const scrollContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -100,7 +162,10 @@ function MessageList({
   const anchorRef = useRef(null);
   const isNearBottomRef = useRef(true);
   const autoLoadGuardRef = useRef(false);
+  const copyTimeoutRef = useRef(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [copiedMessageId, setCopiedMessageId] = useState(null);
+  const [activeReactionMessageId, setActiveReactionMessageId] = useState(null);
 
   const timelineItems = useMemo(() => buildTimelineItems(messages), [messages]);
 
@@ -151,6 +216,12 @@ function MessageList({
       requestOlderMessages();
     }
   }, [hasMoreMessages, isLoadingOlder, messages.length, requestOlderMessages]);
+
+  useEffect(() => () => {
+    if (copyTimeoutRef.current) {
+      clearTimeout(copyTimeoutRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isLoadingOlder) {
@@ -206,6 +277,27 @@ function MessageList({
     return () => window.cancelAnimationFrame(frameId);
   }, [activeConversationId, handleScroll, isLoading, isTyping, messages, scrollToBottom, searchQuery]);
 
+  const handleCopyMessage = async (message) => {
+    try {
+      await navigator.clipboard.writeText(buildCopyText(message));
+      setCopiedMessageId(message.id);
+
+      if (copyTimeoutRef.current) {
+        clearTimeout(copyTimeoutRef.current);
+      }
+
+      copyTimeoutRef.current = setTimeout(() => {
+        setCopiedMessageId(null);
+      }, 1500);
+    } catch (error) {
+      console.error('Copy message error:', error);
+    }
+  };
+
+  const visibleReactionMessageId = messages.some((message) => message.id === activeReactionMessageId)
+    ? activeReactionMessageId
+    : null;
+
   if (isLoading) {
     return <MessageListSkeleton />;
   }
@@ -235,7 +327,7 @@ function MessageList({
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className="theme-surface-muted flex h-full min-h-0 flex-col overflow-y-auto px-4 py-5 sm:px-6"
+        className="theme-surface-muted flex h-full min-h-0 flex-col overflow-x-hidden overflow-y-auto px-4 py-5 sm:px-6"
       >
         <div className="mb-4 flex flex-col items-center gap-2">
           {hasMoreMessages ? (
@@ -274,6 +366,7 @@ function MessageList({
           const canEdit = message.isOwn && !message.deletedAt && message.status !== 'pending' && message.status !== 'failed';
           const canDelete = message.isOwn && !message.deletedAt && message.status !== 'pending';
           const canRetry = message.isOwn && message.status === 'failed';
+          const canCopy = !message.deletedAt && Boolean(message.content?.trim() || message.attachments?.length);
           const receiptLabel = getReceiptLabel(message);
 
           return (
@@ -291,7 +384,7 @@ function MessageList({
                 </div>
               )}
 
-              <div className="max-w-[min(88%,42rem)]">
+              <div className="min-w-0 max-w-[min(88%,42rem)]">
                 <div
                   className={`
                     rounded-3xl px-4 py-3 shadow-sm ring-1
@@ -319,15 +412,29 @@ function MessageList({
                     </div>
                   )}
 
+                  {!message.deletedAt && Boolean(message.attachments?.length) && (
+                    <div className={`${message.content?.trim() ? 'mb-3' : ''} max-w-full grid gap-3 ${
+                      message.attachments.length > 1 ? 'sm:grid-cols-2' : ''
+                    }`}>
+                      {message.attachments.map((attachment) => (
+                        <AttachmentPreview
+                          key={attachment.id}
+                          attachment={attachment}
+                          variant="message"
+                        />
+                      ))}
+                    </div>
+                  )}
+
                   {message.deletedAt ? (
                     <p className={`text-sm italic ${message.isOwn ? 'text-indigo-100/90' : 'text-slate-400'}`}>
                       Message deleted
                     </p>
-                  ) : (
+                  ) : message.content?.trim() ? (
                     <p className="whitespace-pre-wrap break-words text-[15px] leading-6">
-                      {renderHighlightedText(message.content, searchQuery)}
+                      {renderMessageContent(message.content, searchQuery)}
                     </p>
-                  )}
+                  ) : null}
 
                   <div
                     className={`mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-medium ${
@@ -340,6 +447,65 @@ function MessageList({
                   </div>
                 </div>
 
+                {(message.reactions?.length > 0 || message.status !== 'pending') && (
+                  <div className={`mt-2 flex flex-wrap items-center gap-2 ${message.isOwn ? 'justify-end' : 'justify-start'}`}>
+                    {message.reactions?.map((reaction) => (
+                      <button
+                        key={reaction.emoji}
+                        type="button"
+                        onClick={() => {
+                          setActiveReactionMessageId(null);
+                          onToggleReaction(message, reaction.emoji);
+                        }}
+                        className={`rounded-full border px-2.5 py-1 text-xs font-medium transition ${
+                          reaction.reactedByMe
+                            ? 'border-indigo-400/40 bg-indigo-500/15 text-indigo-100'
+                            : 'theme-surface theme-border theme-text'
+                        }`}
+                      >
+                        <span>{reaction.emoji}</span>
+                        <span className="ml-1">{reaction.count}</span>
+                      </button>
+                    ))}
+
+                    {message.status !== 'pending' && (
+                      <div className="relative flex-shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setActiveReactionMessageId((currentId) => (
+                            currentId === message.id ? null : message.id
+                          ))}
+                          className="theme-surface theme-border theme-muted rounded-full border px-2.5 py-1 text-xs font-medium transition hover:bg-slate-200/70"
+                        >
+                          React
+                        </button>
+
+                        {visibleReactionMessageId === message.id && (
+                          <div
+                            className={`theme-card theme-border absolute bottom-full z-20 mb-3 grid w-fit max-w-[calc(100vw-2rem)] grid-cols-[repeat(6,2.5rem)] justify-center gap-1 rounded-2xl border p-2 shadow-xl ${
+                              message.isOwn ? 'right-0' : 'left-0'
+                            }`}
+                          >
+                            {QUICK_REACTIONS.map((emoji) => (
+                              <button
+                                key={emoji}
+                                type="button"
+                                onClick={() => {
+                                  setActiveReactionMessageId(null);
+                                  onToggleReaction(message, emoji);
+                                }}
+                                className="flex h-10 w-10 items-center justify-center place-self-center rounded-full leading-none transition hover:bg-slate-200/70"
+                              >
+                                <span className="block text-[1.35rem] leading-none">{emoji}</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className={`mt-2 flex flex-wrap gap-2 text-xs ${message.isOwn ? 'justify-end' : 'justify-start'}`}>
                   {canReply && (
                     <button
@@ -348,6 +514,15 @@ function MessageList({
                       className="theme-surface theme-border theme-muted rounded-full border px-2.5 py-1 font-medium transition hover:bg-slate-200/70"
                     >
                       Reply
+                    </button>
+                  )}
+                  {canCopy && (
+                    <button
+                      type="button"
+                      onClick={() => handleCopyMessage(message)}
+                      className="theme-surface theme-border theme-muted rounded-full border px-2.5 py-1 font-medium transition hover:bg-slate-200/70"
+                    >
+                      {copiedMessageId === message.id ? 'Copied' : 'Copy'}
                     </button>
                   )}
                   {canEdit && (

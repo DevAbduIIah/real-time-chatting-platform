@@ -67,6 +67,9 @@ export const api = {
     updateMe: (data) => apiRequest('/users/me', { method: 'PATCH', body: JSON.stringify(data) }),
     uploadAvatar: (formData) => apiRequest('/users/me/avatar', { method: 'POST', body: formData }),
   },
+  uploads: {
+    uploadAttachments: (formData) => apiRequest('/uploads/attachments', { method: 'POST', body: formData }),
+  },
   conversations: {
     getAll: () => apiRequest('/conversations'),
     create: (userId) => apiRequest('/conversations', { method: 'POST', body: JSON.stringify({ userId }) }),
@@ -82,6 +85,11 @@ export const api = {
     deleteMessage: (conversationId, messageId) =>
       apiRequest(`/conversations/${conversationId}/messages/${messageId}`, {
         method: 'DELETE',
+      }),
+    toggleReaction: (conversationId, messageId, emoji) =>
+      apiRequest(`/conversations/${conversationId}/messages/${messageId}/reactions`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji }),
       }),
   },
 };

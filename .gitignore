@@ -117,6 +117,9 @@ server/uploads/*
 !server/uploads/avatars/
 server/uploads/avatars/*
 !server/uploads/avatars/.gitkeep
+!server/uploads/attachments/
+server/uploads/attachments/*
+!server/uploads/attachments/.gitkeep
 
 # Vercel
 .vercel

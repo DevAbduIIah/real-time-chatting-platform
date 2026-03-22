@@ -26,6 +26,8 @@ model User {
   conversationsAsUser1 Conversation[] @relation("User1Conversations")
   conversationsAsUser2 Conversation[] @relation("User2Conversations")
   sentMessages         Message[]      @relation("SentMessages")
+  uploadedAttachments  Attachment[]
+  reactions            Reaction[]
 }
 
 model Conversation {
@@ -49,28 +51,64 @@ model Conversation {
 }
 
 model Message {
-  id             String    @id @default(uuid())
-  clientTempId   String?
-  content        String
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @default(now()) @updatedAt
-  editedAt       DateTime?
-  deletedAt      DateTime?
-  deliveredAt    DateTime?
-  readAt         DateTime?
+  id               String    @id @default(uuid())
+  clientTempId     String?
+  content          String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @default(now()) @updatedAt
+  editedAt         DateTime?
+  deletedAt        DateTime?
+  deliveredAt      DateTime?
+  readAt           DateTime?
   replyToMessageId String?
 
   // Relations
-  senderId        String
-  sender          User         @relation("SentMessages", fields: [senderId], references: [id])
-  conversationId  String
-  conversation    Conversation @relation(fields: [conversationId], references: [id])
-  replyToMessage  Message?     @relation("MessageReplies", fields: [replyToMessageId], references: [id])
-  replies         Message[]    @relation("MessageReplies")
+  senderId         String
+  sender           User         @relation("SentMessages", fields: [senderId], references: [id])
+  conversationId   String
+  conversation     Conversation @relation(fields: [conversationId], references: [id])
+  replyToMessage   Message?     @relation("MessageReplies", fields: [replyToMessageId], references: [id])
+  replies          Message[]    @relation("MessageReplies")
+  attachments      Attachment[]
+  reactions        Reaction[]
 
   @@index([conversationId])
   @@index([conversationId, createdAt])
   @@index([conversationId, readAt])
   @@index([conversationId, deliveredAt])
   @@unique([senderId, clientTempId])
+}
+
+model Attachment {
+  id           String   @id @default(uuid())
+  originalName String
+  storedName   String
+  mimeType     String
+  size         Int
+  kind         String
+  url          String
+  createdAt    DateTime @default(now())
+
+  uploadedById String
+  uploadedBy   User    @relation(fields: [uploadedById], references: [id])
+  messageId    String?
+  message      Message? @relation(fields: [messageId], references: [id])
+
+  @@index([messageId])
+  @@index([uploadedById])
+}
+
+model Reaction {
+  id        String   @id @default(uuid())
+  emoji     String
+  createdAt DateTime @default(now())
+
+  messageId String
+  message   Message @relation(fields: [messageId], references: [id])
+  userId    String
+  user      User    @relation(fields: [userId], references: [id])
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+  @@index([userId])
 }

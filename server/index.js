@@ -9,6 +9,7 @@ require('dotenv').config();
 const authRoutes = require('./routes/auth');
 const usersRoutes = require('./routes/users');
 const conversationsRoutes = require('./routes/conversations');
+const uploadsRoutes = require('./routes/uploads');
 const { setupSocketHandlers } = require('./socket');
 
 const app = express();
@@ -31,6 +32,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', usersRoutes);
+app.use('/api/uploads', uploadsRoutes);
 app.use('/api/conversations', conversationsRoutes);
 
 app.get('/api/health', (req, res) => {
