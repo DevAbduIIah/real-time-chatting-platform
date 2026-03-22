@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
+import { useToast } from '../context/ToastContext';
 import { api } from '../lib/api';
 import { createPendingMessage, mergeMessages, removeMessage, updateMessageById, upsertMessage } from '../lib/message-utils';
 import Sidebar from '../components/Sidebar';
@@ -95,7 +96,16 @@ function Chat() {
   const navigate = useNavigate();
   const { conversationId: routeConversationId } = useParams();
   const { user, logout } = useAuth();
-  const { socket, isConnected, sendMessage, sendTyping, sendStopTyping } = useSocket();
+  const { pushToast } = useToast();
+  const {
+    socket,
+    isConnected,
+    connectionState,
+    reconnectVersion,
+    sendMessage,
+    sendTyping,
+    sendStopTyping,
+  } = useSocket();
   const [users, setUsers] = useState([]);
   const [conversations, setConversations] = useState([]);
   const [messages, setMessages] = useState([]);
@@ -217,6 +227,90 @@ function Chat() {
     pendingTimeoutsRef.current.set(clientTempId, timeoutId);
   }, [clearPendingTimeout, markMessageFailed]);
 
+  const refreshSidebarData = useCallback(async ({ showLoading = false } = {}) => {
+    if (showLoading) {
+      setIsSidebarLoading(true);
+    }
+
+    try {
+      const [usersData, conversationsData] = await Promise.all([
+        api.users.getAll(),
+        api.conversations.getAll(),
+      ]);
+
+      setUsers(usersData.users);
+      setConversations(sortConversationsByActivity(conversationsData.conversations));
+    } catch (err) {
+      console.error('Error fetching data:', err);
+    } finally {
+      if (showLoading) {
+        setIsSidebarLoading(false);
+      }
+    }
+  }, []);
+
+  const syncActiveConversationMessages = useCallback(async () => {
+    if (!selectedConversationId) {
+      return;
+    }
+
+    const requestKey = `${selectedConversationId}::${normalizedMessageSearchQuery}`;
+
+    try {
+      const data = await api.conversations.getMessages(selectedConversationId, {
+        limit: MESSAGE_PAGE_SIZE,
+        search: normalizedMessageSearchQuery || undefined,
+      });
+
+      if (activeMessageViewRef.current !== requestKey) {
+        return;
+      }
+
+      setMessages((prev) => (
+        normalizedMessageSearchQuery ? data.messages : mergeMessages(prev, data.messages)
+      ));
+      setHasMoreMessages(data.pagination.hasMore);
+      setNextMessageCursor(data.pagination.nextCursor);
+      setConversations((prev) =>
+        prev.map((conversation) => (
+          conversation.id === selectedConversationId
+            ? { ...conversation, unreadCount: 0 }
+            : conversation
+        ))
+      );
+      setScrollToLatestToken((prev) => prev + 1);
+    } catch (err) {
+      console.error('Error syncing messages after reconnect:', err);
+    }
+  }, [normalizedMessageSearchQuery, selectedConversationId]);
+
+  const notifyAboutIncomingMessage = useCallback((message) => {
+    if (message.isOwn || selectedConversationId === message.conversationId) {
+      return;
+    }
+
+    const matchingConversation = conversations.find((conversation) => conversation.id === message.conversationId);
+    const title = matchingConversation
+      ? getConversationTitle(matchingConversation)
+      : message.senderName || 'New message';
+    const preview = buildConversationPreview(message, user.id).content || 'New message';
+
+    pushToast({
+      title,
+      message: preview,
+    });
+
+    if (
+      typeof window !== 'undefined'
+      && 'Notification' in window
+      && window.Notification.permission === 'granted'
+      && document.hidden
+    ) {
+      const notification = new window.Notification(title, { body: preview });
+      window.setTimeout(() => notification.close(), 5000);
+    }
+  }, [conversations, pushToast, selectedConversationId, user.id]);
+
   useEffect(() => {
     const pendingTimeouts = pendingTimeoutsRef.current;
 
@@ -227,24 +321,17 @@ function Chat() {
   }, []);
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [usersData, conversationsData] = await Promise.all([
-          api.users.getAll(),
-          api.conversations.getAll(),
-        ]);
+    void refreshSidebarData({ showLoading: true });
+  }, [refreshSidebarData]);
 
-        setUsers(usersData.users);
-        setConversations(sortConversationsByActivity(conversationsData.conversations));
-      } catch (err) {
-        console.error('Error fetching data:', err);
-      } finally {
-        setIsSidebarLoading(false);
-      }
-    };
+  useEffect(() => {
+    if (!reconnectVersion) {
+      return;
+    }
 
-    fetchData();
-  }, []);
+    void refreshSidebarData();
+    void syncActiveConversationMessages();
+  }, [reconnectVersion, refreshSidebarData, syncActiveConversationMessages]);
 
   useEffect(() => {
     if (!selectedConversationId || isSidebarLoading) return;
@@ -331,6 +418,8 @@ function Chat() {
         message,
         message.isOwn || isActiveConversation ? 'zero' : 'increment'
       );
+
+      notifyAboutIncomingMessage(message);
     };
 
     const handleMessageAck = ({ clientTempId, message }) => {
@@ -339,8 +428,16 @@ function Chat() {
       applyConversationMessage(message, 'zero');
     };
 
-    const handleMessageError = ({ clientTempId }) => {
+    const handleMessageError = ({ clientTempId, error }) => {
       clearPendingTimeout(clientTempId);
+      if (error) {
+        pushToast({
+          title: 'Message error',
+          message: error,
+          tone: 'error',
+        });
+      }
+
       if (!clientTempId) return;
 
       setMessages((prev) =>
@@ -436,7 +533,9 @@ function Chat() {
     isConnected,
     navigate,
     normalizedMessageSearchQuery,
+    notifyAboutIncomingMessage,
     removeConversation,
+    pushToast,
     selectedConversationId,
     socket,
     syncConversationRead,
@@ -792,7 +891,7 @@ function Chat() {
 
   return (
     <div className="theme-gradient-page flex h-screen overflow-hidden">
-      {!isConnected && user && (
+      {connectionState === 'reconnecting' && user && (
         <div className="fixed left-0 right-0 top-0 z-50 bg-amber-500 px-4 py-2 text-center text-sm text-white">
           Reconnecting to server...
         </div>

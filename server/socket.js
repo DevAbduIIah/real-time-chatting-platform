@@ -11,8 +11,35 @@ const {
   getMessagePreview,
 } = require('./routes/message-helpers');
 
-// Store connected users: { userId: socketId }
+// Store connected users: { userId: Set<socketId> }
 const connectedUsers = new Map();
+
+function addConnectedSocket(userId, socketId) {
+  const activeSockets = connectedUsers.get(userId) || new Set();
+  const wasOffline = activeSockets.size === 0;
+
+  activeSockets.add(socketId);
+  connectedUsers.set(userId, activeSockets);
+
+  return wasOffline;
+}
+
+function removeConnectedSocket(userId, socketId) {
+  const activeSockets = connectedUsers.get(userId);
+  if (!activeSockets) {
+    return false;
+  }
+
+  activeSockets.delete(socketId);
+
+  if (activeSockets.size === 0) {
+    connectedUsers.delete(userId);
+    return true;
+  }
+
+  connectedUsers.set(userId, activeSockets);
+  return false;
+}
 
 function getConversationWhereForUser(userId) {
   return {
@@ -110,14 +137,17 @@ function setupSocketHandlers(io) {
     const userId = socket.userId;
     console.log(`User connected: ${userId}`);
 
-    connectedUsers.set(userId, socket.id);
+    const becameOnline = addConnectedSocket(userId, socket.id);
     socket.join(userId);
 
     joinConversationRooms(socket, userId).catch((error) => {
       console.error('Join conversation rooms error:', error);
     });
 
-    socket.broadcast.emit('user_online', { userId });
+    if (becameOnline) {
+      socket.broadcast.emit('user_online', { userId });
+    }
+
     socket.emit('online_users', { userIds: Array.from(connectedUsers.keys()) });
 
     socket.on('send_message', async (data) => {
@@ -275,7 +305,12 @@ function setupSocketHandlers(io) {
 
     socket.on('disconnect', () => {
       console.log(`User disconnected: ${userId}`);
-      connectedUsers.delete(userId);
+      const becameOffline = removeConnectedSocket(userId, socket.id);
+
+      if (!becameOffline) {
+        return;
+      }
+
       prisma.user.update({
         where: { id: userId },
         data: { lastSeenAt: new Date() },
