@@ -41,6 +41,21 @@ export async function apiRequest(endpoint, options = {}) {
   return data;
 }
 
+function buildQueryString(params = {}) {
+  const searchParams = new URLSearchParams();
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') {
+      return;
+    }
+
+    searchParams.set(key, value);
+  });
+
+  const queryString = searchParams.toString();
+  return queryString ? `?${queryString}` : '';
+}
+
 export const api = {
   auth: {
     register: (data) => apiRequest('/auth/register', { method: 'POST', body: JSON.stringify(data) }),
@@ -55,7 +70,8 @@ export const api = {
   conversations: {
     getAll: () => apiRequest('/conversations'),
     create: (userId) => apiRequest('/conversations', { method: 'POST', body: JSON.stringify({ userId }) }),
-    getMessages: (id) => apiRequest(`/conversations/${id}/messages`),
+    getMessages: (id, params = {}) =>
+      apiRequest(`/conversations/${id}/messages${buildQueryString(params)}`),
     markRead: (id) => apiRequest(`/conversations/${id}/read`, { method: 'POST' }),
     sendMessage: (id, data) => apiRequest(`/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify(data) }),
     editMessage: (conversationId, messageId, content) =>

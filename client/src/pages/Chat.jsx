@@ -1,13 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
 import { api } from '../lib/api';
-import { createPendingMessage, updateMessageById, upsertMessage } from '../lib/message-utils';
+import {
+  createPendingMessage,
+  mergeMessages,
+  removeMessage,
+  updateMessageById,
+  upsertMessage,
+} from '../lib/message-utils';
 import Sidebar from '../components/Sidebar';
 import ChatHeader from '../components/ChatHeader';
 import MessageList from '../components/MessageList';
 import MessageInput from '../components/MessageInput';
 import EmptyState from '../components/EmptyState';
+
+const MESSAGE_PAGE_SIZE = 30;
 
 function sortConversationsByActivity(conversationList) {
   return [...conversationList].sort((a, b) => {
@@ -39,21 +48,52 @@ function buildConversationPreview(message, currentUserId) {
   };
 }
 
+function doesMessageMatchSearch(message, searchTerm) {
+  const normalizedSearchTerm = searchTerm.trim().toLowerCase();
+
+  if (!normalizedSearchTerm) {
+    return true;
+  }
+
+  if (message.deletedAt) {
+    return false;
+  }
+
+  return (message.content || '').toLowerCase().includes(normalizedSearchTerm);
+}
+
+function upsertVisibleMessage(messageList, nextMessage, searchTerm) {
+  if (!doesMessageMatchSearch(nextMessage, searchTerm)) {
+    return removeMessage(messageList, nextMessage);
+  }
+
+  return upsertMessage(messageList, nextMessage);
+}
+
 function Chat() {
+  const navigate = useNavigate();
+  const { conversationId: routeConversationId } = useParams();
   const { user, logout } = useAuth();
   const { socket, isConnected, sendMessage, sendTyping, sendStopTyping } = useSocket();
   const [users, setUsers] = useState([]);
   const [conversations, setConversations] = useState([]);
-  const [selectedConversationId, setSelectedConversationId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => !isMobileViewport());
   const [isSidebarLoading, setIsSidebarLoading] = useState(true);
   const [isMessagesLoading, setIsMessagesLoading] = useState(false);
+  const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
+  const [nextMessageCursor, setNextMessageCursor] = useState(null);
   const [isOtherUserTyping, setIsOtherUserTyping] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [messageSearchQuery, setMessageSearchQuery] = useState('');
   const [replyToMessage, setReplyToMessage] = useState(null);
   const [editingMessageId, setEditingMessageId] = useState(null);
   const pendingTimeoutsRef = useRef(new Map());
+  const activeMessageViewRef = useRef('');
+
+  const selectedConversationId = routeConversationId || null;
+  const normalizedMessageSearchQuery = messageSearchQuery.trim();
 
   const selectedConversation = useMemo(
     () =>
@@ -79,11 +119,11 @@ function Chat() {
   const updateConversationSummary = useCallback((conversationId, updater) => {
     setConversations((prev) =>
       sortConversationsByActivity(
-        prev.map((conversation) =>
+        prev.map((conversation) => (
           conversation.id === conversationId
             ? updater(conversation)
             : conversation
-        )
+        ))
       )
     );
   }, []);
@@ -107,11 +147,11 @@ function Chat() {
     if (!conversationId) return;
 
     setConversations((prev) =>
-      prev.map((conversation) =>
+      prev.map((conversation) => (
         conversation.id === conversationId
           ? { ...conversation, unreadCount: 0 }
           : conversation
-      )
+      ))
     );
 
     try {
@@ -123,11 +163,11 @@ function Chat() {
 
   const markMessageFailed = useCallback((clientTempId) => {
     setMessages((prev) =>
-      prev.map((message) =>
+      prev.map((message) => (
         message.clientTempId === clientTempId && message.status === 'pending'
           ? { ...message, status: 'failed' }
           : message
-      )
+      ))
     );
   }, []);
 
@@ -172,40 +212,76 @@ function Chat() {
   }, []);
 
   useEffect(() => {
+    if (!selectedConversationId || isSidebarLoading) {
+      return;
+    }
+
+    const hasConversation = conversations.some(
+      (conversation) => conversation.id === selectedConversationId
+    );
+
+    if (!hasConversation) {
+      navigate('/chat', { replace: true });
+    }
+  }, [conversations, isSidebarLoading, navigate, selectedConversationId]);
+
+  useEffect(() => {
     setReplyToMessage(null);
     setEditingMessageId(null);
     setIsOtherUserTyping(false);
+    setMessageSearchQuery('');
   }, [selectedConversationId]);
 
   useEffect(() => {
     if (!selectedConversationId) {
+      activeMessageViewRef.current = '';
       setMessages([]);
+      setHasMoreMessages(false);
+      setNextMessageCursor(null);
       setIsMessagesLoading(false);
+      setIsLoadingOlderMessages(false);
       return;
     }
 
-    const fetchMessages = async () => {
-      setIsMessagesLoading(true);
+    const requestKey = `${selectedConversationId}::${normalizedMessageSearchQuery}`;
+    activeMessageViewRef.current = requestKey;
+    setIsMessagesLoading(true);
+    setMessages([]);
+    setHasMoreMessages(false);
+    setNextMessageCursor(null);
 
+    const fetchMessages = async () => {
       try {
-        const data = await api.conversations.getMessages(selectedConversationId);
+        const data = await api.conversations.getMessages(selectedConversationId, {
+          limit: MESSAGE_PAGE_SIZE,
+          search: normalizedMessageSearchQuery || undefined,
+        });
+
+        if (activeMessageViewRef.current !== requestKey) {
+          return;
+        }
+
         setMessages(data.messages);
+        setHasMoreMessages(data.pagination.hasMore);
+        setNextMessageCursor(data.pagination.nextCursor);
         setConversations((prev) =>
-          prev.map((conversation) =>
+          prev.map((conversation) => (
             conversation.id === selectedConversationId
               ? { ...conversation, unreadCount: 0 }
               : conversation
-          )
+          ))
         );
       } catch (err) {
         console.error('Error fetching messages:', err);
       } finally {
-        setIsMessagesLoading(false);
+        if (activeMessageViewRef.current === requestKey) {
+          setIsMessagesLoading(false);
+        }
       }
     };
 
     fetchMessages();
-  }, [selectedConversationId]);
+  }, [normalizedMessageSearchQuery, selectedConversationId]);
 
   useEffect(() => {
     if (!socket || !isConnected) return;
@@ -214,7 +290,9 @@ function Chat() {
       const isActiveConversation = selectedConversationId === message.conversationId;
 
       if (isActiveConversation) {
-        setMessages((prev) => upsertMessage(prev, message));
+        setMessages((prev) =>
+          upsertVisibleMessage(prev, message, normalizedMessageSearchQuery)
+        );
       }
 
       if (isActiveConversation && !message.isOwn) {
@@ -230,7 +308,9 @@ function Chat() {
 
     const handleMessageAck = ({ clientTempId, message }) => {
       clearPendingTimeout(clientTempId);
-      setMessages((prev) => upsertMessage(prev, message));
+      setMessages((prev) =>
+        upsertVisibleMessage(prev, message, normalizedMessageSearchQuery)
+      );
       applyConversationMessage(message, 'zero');
     };
 
@@ -239,31 +319,35 @@ function Chat() {
       if (!clientTempId) return;
 
       setMessages((prev) =>
-        prev.map((message) =>
+        prev.map((message) => (
           message.clientTempId === clientTempId
             ? { ...message, status: 'failed' }
             : message
-        )
+        ))
       );
     };
 
     const handleMessageUpdated = (message) => {
-      setMessages((prev) => upsertMessage(prev, message));
+      setMessages((prev) =>
+        upsertVisibleMessage(prev, message, normalizedMessageSearchQuery)
+      );
     };
 
     const handleMessageDeleted = (message) => {
-      setMessages((prev) => upsertMessage(prev, message));
+      setMessages((prev) =>
+        upsertVisibleMessage(prev, message, normalizedMessageSearchQuery)
+      );
     };
 
     const handleMessagesSeen = ({ messageIds, readAt }) => {
       const messageIdSet = new Set(messageIds);
 
       setMessages((prev) =>
-        prev.map((message) =>
+        prev.map((message) => (
           messageIdSet.has(message.id)
             ? { ...message, readAt, status: 'seen' }
             : message
-        )
+        ))
       );
     };
 
@@ -313,6 +397,7 @@ function Chat() {
     applyConversationMessage,
     clearPendingTimeout,
     isConnected,
+    normalizedMessageSearchQuery,
     selectedConversationId,
     socket,
     syncConversationRead,
@@ -339,19 +424,19 @@ function Chat() {
 
       if (existingConversation) {
         setConversations((prev) =>
-          prev.map((conversation) =>
+          prev.map((conversation) => (
             conversation.id === existingConversation.id
               ? { ...conversation, unreadCount: 0 }
               : conversation
-          )
+          ))
         );
-        setSelectedConversationId(existingConversation.id);
+        navigate(`/chat/${existingConversation.id}`);
       } else {
         const data = await api.conversations.create(selectedUser.id);
         setConversations((prev) =>
           sortConversationsByActivity([data.conversation, ...prev])
         );
-        setSelectedConversationId(data.conversation.id);
+        navigate(`/chat/${data.conversation.id}`);
       }
 
       if (isMobileViewport()) {
@@ -361,6 +446,50 @@ function Chat() {
       console.error('Error selecting user:', err);
     }
   };
+
+  const loadOlderMessages = useCallback(async () => {
+    if (
+      !selectedConversationId
+      || !nextMessageCursor
+      || !hasMoreMessages
+      || isLoadingOlderMessages
+      || isMessagesLoading
+    ) {
+      return;
+    }
+
+    const requestKey = `${selectedConversationId}::${normalizedMessageSearchQuery}`;
+    setIsLoadingOlderMessages(true);
+
+    try {
+      const data = await api.conversations.getMessages(selectedConversationId, {
+        cursor: nextMessageCursor,
+        limit: MESSAGE_PAGE_SIZE,
+        search: normalizedMessageSearchQuery || undefined,
+      });
+
+      if (activeMessageViewRef.current !== requestKey) {
+        return;
+      }
+
+      setMessages((prev) => mergeMessages(prev, data.messages));
+      setHasMoreMessages(data.pagination.hasMore);
+      setNextMessageCursor(data.pagination.nextCursor);
+    } catch (err) {
+      console.error('Error loading older messages:', err);
+    } finally {
+      if (activeMessageViewRef.current === requestKey) {
+        setIsLoadingOlderMessages(false);
+      }
+    }
+  }, [
+    hasMoreMessages,
+    isLoadingOlderMessages,
+    isMessagesLoading,
+    nextMessageCursor,
+    normalizedMessageSearchQuery,
+    selectedConversationId,
+  ]);
 
   const sendNewMessage = useCallback(async ({ content, replyMessage, existingFailedMessage = null }) => {
     if (!selectedConversation) {
@@ -385,11 +514,13 @@ function Chat() {
           replyToMessage: replyMessage,
         });
 
-    setMessages((prev) =>
-      existingFailedMessage
+    setMessages((prev) => {
+      const nextMessages = existingFailedMessage
         ? updateMessageById(prev, existingFailedMessage.id, () => pendingMessage)
-        : upsertMessage(prev, pendingMessage)
-    );
+        : prev;
+
+      return upsertVisibleMessage(nextMessages, pendingMessage, normalizedMessageSearchQuery);
+    });
     applyConversationMessage(pendingMessage, 'zero');
     schedulePendingTimeout(pendingMessage.clientTempId);
 
@@ -412,16 +543,18 @@ function Chat() {
     try {
       const data = await api.conversations.sendMessage(selectedConversation.id, payload);
       clearPendingTimeout(pendingMessage.clientTempId);
-      setMessages((prev) => upsertMessage(prev, data.message));
+      setMessages((prev) =>
+        upsertVisibleMessage(prev, data.message, normalizedMessageSearchQuery)
+      );
       applyConversationMessage(data.message, 'zero');
     } catch (err) {
       clearPendingTimeout(pendingMessage.clientTempId);
       setMessages((prev) =>
-        prev.map((message) =>
+        prev.map((message) => (
           message.clientTempId === pendingMessage.clientTempId
             ? { ...message, status: 'failed' }
             : message
-        )
+        ))
       );
       console.error('Error sending message:', err);
     }
@@ -429,6 +562,7 @@ function Chat() {
     applyConversationMessage,
     clearPendingTimeout,
     isConnected,
+    normalizedMessageSearchQuery,
     schedulePendingTimeout,
     selectedConversation,
     sendMessage,
@@ -437,6 +571,10 @@ function Chat() {
   ]);
 
   const handleSubmitMessage = async (content) => {
+    if (!selectedConversation) {
+      return;
+    }
+
     if (editingMessage) {
       try {
         const data = await api.conversations.editMessage(
@@ -444,7 +582,9 @@ function Chat() {
           editingMessage.id,
           content.trim()
         );
-        setMessages((prev) => upsertMessage(prev, data.message));
+        setMessages((prev) =>
+          upsertVisibleMessage(prev, data.message, normalizedMessageSearchQuery)
+        );
 
         if (selectedConversation.lastMessage?.id === data.message.id) {
           applyConversationMessage(data.message, 'keep');
@@ -481,7 +621,9 @@ function Chat() {
 
     try {
       const data = await api.conversations.deleteMessage(selectedConversation.id, message.id);
-      setMessages((prev) => upsertMessage(prev, data.message));
+      setMessages((prev) =>
+        upsertVisibleMessage(prev, data.message, normalizedMessageSearchQuery)
+      );
 
       if (selectedConversation.lastMessage?.id === data.message.id) {
         applyConversationMessage(data.message, 'keep');
@@ -566,7 +708,7 @@ function Chat() {
   }, [conversations, searchQuery, users]);
 
   return (
-    <div className="theme-gradient-page flex h-screen">
+    <div className="theme-gradient-page flex h-screen overflow-hidden">
       {!isConnected && user && (
         <div className="fixed left-0 right-0 top-0 z-50 bg-amber-500 px-4 py-2 text-center text-sm text-white">
           Reconnecting to server...
@@ -586,7 +728,7 @@ function Chat() {
         onSearchChange={setSearchQuery}
       />
 
-      <div className={`min-w-0 flex-1 flex-col ${isSidebarOpen ? 'hidden lg:flex' : 'flex'}`}>
+      <div className={`min-h-0 min-w-0 flex-1 flex-col ${isSidebarOpen ? 'hidden lg:flex' : 'flex'}`}>
         {selectedConversation ? (
           <>
             <ChatHeader
@@ -594,11 +736,58 @@ function Chat() {
               onMenuClick={() => setIsSidebarOpen((prev) => !prev)}
               isTyping={isOtherUserTyping}
             />
+
+            <div className="theme-surface border-b px-4 py-3 sm:px-5 theme-border">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center">
+                <div className="relative flex-1">
+                  <input
+                    type="text"
+                    value={messageSearchQuery}
+                    onChange={(event) => setMessageSearchQuery(event.target.value)}
+                    placeholder="Search messages in this conversation..."
+                    className="theme-input w-full rounded-2xl py-2.5 pl-10 pr-4 text-sm outline-none transition"
+                  />
+                  <svg
+                    className="theme-muted absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-4.35-4.35m1.6-5.15a6.75 6.75 0 11-13.5 0 6.75 6.75 0 0113.5 0z" />
+                  </svg>
+                </div>
+
+                {messageSearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setMessageSearchQuery('')}
+                    className="theme-surface-muted theme-border theme-text rounded-full border px-4 py-2 text-sm font-medium transition hover:bg-slate-200/70"
+                  >
+                    Clear search
+                  </button>
+                )}
+              </div>
+
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+                {normalizedMessageSearchQuery ? (
+                  <p className="theme-muted">
+                    Showing matches for <span className="theme-text font-medium">"{normalizedMessageSearchQuery}"</span>
+                  </p>
+                ) : (
+                  <p className="theme-muted">Search the current conversation and load older history as you scroll.</p>
+                )}
+              </div>
+            </div>
+
             <MessageList
               messages={messages}
               isTyping={isOtherUserTyping}
               isLoading={isMessagesLoading}
+              isLoadingOlder={isLoadingOlderMessages}
+              hasMoreMessages={hasMoreMessages}
               activeConversationId={selectedConversationId}
+              searchQuery={normalizedMessageSearchQuery}
+              onLoadOlder={loadOlderMessages}
               onReply={handleReplyMessage}
               onEdit={handleEditMessage}
               onDelete={handleDeleteMessage}
@@ -616,6 +805,18 @@ function Chat() {
               onCancelEdit={() => setEditingMessageId(null)}
             />
           </>
+        ) : selectedConversationId && isSidebarLoading ? (
+          <div className="theme-surface-muted flex-1">
+            <EmptyState
+              title="Loading conversation"
+              description="Restoring your selected conversation."
+              icon={(
+                <svg className="h-8 w-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582M20 20v-5h-.581M5.44 19A9 9 0 1020 11.31" />
+                </svg>
+              )}
+            />
+          </div>
         ) : (
           <div className="theme-surface-muted flex-1">
             <EmptyState

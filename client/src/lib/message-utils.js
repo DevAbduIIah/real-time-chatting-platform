@@ -64,6 +64,44 @@ export function upsertMessage(messageList, nextMessage) {
   );
 }
 
+export function compareMessages(leftMessage, rightMessage) {
+  const leftTimestamp = new Date(leftMessage.createdAt).getTime();
+  const rightTimestamp = new Date(rightMessage.createdAt).getTime();
+
+  if (leftTimestamp !== rightTimestamp) {
+    return leftTimestamp - rightTimestamp;
+  }
+
+  const leftKey = leftMessage.id || leftMessage.clientTempId || '';
+  const rightKey = rightMessage.id || rightMessage.clientTempId || '';
+
+  return leftKey.localeCompare(rightKey);
+}
+
+export function mergeMessages(messageList, nextMessages) {
+  return nextMessages
+    .reduce((list, nextMessage) => upsertMessage(list, nextMessage), messageList)
+    .sort(compareMessages);
+}
+
+export function removeMessage(messageList, targetMessage) {
+  return messageList.filter((message) => {
+    if (targetMessage.id && message.id === targetMessage.id) {
+      return false;
+    }
+
+    if (
+      targetMessage.clientTempId
+      && message.clientTempId
+      && targetMessage.clientTempId === message.clientTempId
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
 export function updateMessageById(messageList, messageId, updater) {
   return messageList.map((message) =>
     message.id === messageId ? updater(message) : message

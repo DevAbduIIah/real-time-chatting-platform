@@ -117,21 +117,21 @@ Improve usability for larger conversations and longer-term use.
 
 ### Tasks
 
-- Add **message search**
-  - Search within current conversation
-  - Highlight matched messages
-- Add **conversation search**
-  - Quickly find users or chats
-- Add **pagination or infinite scroll** for older messages
-- Preserve scroll position when loading older messages
-- Add **jump to latest message** button when user scrolls up
-- Improve route/state sync so refreshing the page preserves the selected conversation if possible
-- Add better URL structure for direct conversation access if suitable
+- [x] Add **message search**
+  - [x] Search within current conversation
+  - [x] Highlight matched messages
+- [x] Add **conversation search**
+  - [x] Quickly find users or chats
+- [x] Add **pagination or infinite scroll** for older messages
+- [x] Preserve scroll position when loading older messages
+- [x] Add **jump to latest message** button when user scrolls up
+- [x] Improve route/state sync so refreshing the page preserves the selected conversation if possible
+- [x] Add better URL structure for direct conversation access if suitable
 
 ### Done When
 
-- Large chats remain usable
-- Users can find old messages and conversations easily
+- [x] Large chats remain usable
+- [x] Users can find old messages and conversations easily
 
 ---
 

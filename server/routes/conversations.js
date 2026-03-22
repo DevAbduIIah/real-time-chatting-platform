@@ -16,6 +16,8 @@ const {
 } = require('./message-helpers');
 
 const router = express.Router();
+const DEFAULT_MESSAGES_LIMIT = 30;
+const MAX_MESSAGES_LIMIT = 60;
 
 function getConversationWhereForUser(userId) {
   return {
@@ -33,6 +35,104 @@ async function getConversationById(conversationId, userId) {
       ...getConversationWhereForUser(userId),
     },
   });
+}
+
+function parseMessagesLimit(value) {
+  const parsed = Number.parseInt(value, 10);
+
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return DEFAULT_MESSAGES_LIMIT;
+  }
+
+  return Math.min(parsed, MAX_MESSAGES_LIMIT);
+}
+
+function encodeMessageCursor(message) {
+  return `${message.createdAt.toISOString()}__${message.id}`;
+}
+
+function parseMessageCursor(cursor) {
+  if (!cursor) {
+    return null;
+  }
+
+  const separatorIndex = cursor.lastIndexOf('__');
+  if (separatorIndex === -1) {
+    return null;
+  }
+
+  const createdAt = cursor.slice(0, separatorIndex);
+  const id = cursor.slice(separatorIndex + 2);
+  const date = new Date(createdAt);
+
+  if (!id || Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return {
+    id,
+    createdAt: date,
+  };
+}
+
+function buildMessageWhereClause(conversationId, searchTerm, cursor) {
+  const normalizedSearchTerm = searchTerm?.trim();
+  const where = {
+    conversationId,
+  };
+
+  if (normalizedSearchTerm) {
+    where.deletedAt = null;
+    where.content = {
+      contains: normalizedSearchTerm,
+    };
+  }
+
+  if (cursor) {
+    where.OR = [
+      {
+        createdAt: { lt: cursor.createdAt },
+      },
+      {
+        AND: [
+          { createdAt: cursor.createdAt },
+          { id: { lt: cursor.id } },
+        ],
+      },
+    ];
+  }
+
+  return where;
+}
+
+async function getPaginatedMessages({
+  conversationId,
+  currentUserId,
+  cursor,
+  limit,
+  searchTerm,
+}) {
+  const rows = await prisma.message.findMany({
+    where: buildMessageWhereClause(conversationId, searchTerm, cursor),
+    orderBy: [
+      { createdAt: 'desc' },
+      { id: 'desc' },
+    ],
+    take: limit + 1,
+    include: getMessageInclude(),
+  });
+
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore ? encodeMessageCursor(pageRows[pageRows.length - 1]) : null;
+
+  return {
+    messages: pageRows.reverse().map((message) => formatMessage(message, currentUserId)),
+    pagination: {
+      hasMore,
+      nextCursor,
+    },
+  };
 }
 
 async function getUnreadCount(conversation, currentUserId) {
@@ -216,6 +316,9 @@ router.post('/', auth, async (req, res) => {
 router.get('/:id/messages', auth, async (req, res) => {
   try {
     const { id } = req.params;
+    const limit = parseMessagesLimit(req.query.limit);
+    const cursor = parseMessageCursor(req.query.cursor);
+    const searchTerm = typeof req.query.search === 'string' ? req.query.search : '';
     const conversation = await getConversationById(id, req.user.id);
 
     if (!conversation) {
@@ -223,15 +326,17 @@ router.get('/:id/messages', auth, async (req, res) => {
     }
 
     await markConversationAsSeen(conversation, req.user.id, req.app.get('io'));
-
-    const messages = await prisma.message.findMany({
-      where: { conversationId: id },
-      orderBy: { createdAt: 'asc' },
-      include: getMessageInclude(),
+    const messagePage = await getPaginatedMessages({
+      conversationId: id,
+      currentUserId: req.user.id,
+      cursor,
+      limit,
+      searchTerm,
     });
 
     res.json({
-      messages: messages.map((message) => formatMessage(message, req.user.id)),
+      ...messagePage,
+      search: searchTerm.trim(),
     });
   } catch (err) {
     console.error('Get messages error:', err);
