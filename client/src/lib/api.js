@@ -1,11 +1,30 @@
-const API_URL = 'http://localhost:5000/api';
+const API_ROOT = 'http://localhost:5000';
+const API_URL = `${API_ROOT}/api`;
+
+export function getAssetUrl(assetPath) {
+  if (!assetPath) {
+    return null;
+  }
+
+  if (
+    assetPath.startsWith('http://')
+    || assetPath.startsWith('https://')
+    || assetPath.startsWith('blob:')
+    || assetPath.startsWith('data:')
+  ) {
+    return assetPath;
+  }
+
+  return `${API_ROOT}${assetPath}`;
+}
 
 export async function apiRequest(endpoint, options = {}) {
   const token = localStorage.getItem('token');
+  const isFormData = options.body instanceof FormData;
 
   const config = {
     headers: {
-      'Content-Type': 'application/json',
+      ...(!isFormData && { 'Content-Type': 'application/json' }),
       ...(token && { Authorization: `Bearer ${token}` }),
       ...options.headers,
     },
@@ -30,11 +49,23 @@ export const api = {
   },
   users: {
     getAll: () => apiRequest('/users'),
+    updateMe: (data) => apiRequest('/users/me', { method: 'PATCH', body: JSON.stringify(data) }),
+    uploadAvatar: (formData) => apiRequest('/users/me/avatar', { method: 'POST', body: formData }),
   },
   conversations: {
     getAll: () => apiRequest('/conversations'),
     create: (userId) => apiRequest('/conversations', { method: 'POST', body: JSON.stringify({ userId }) }),
     getMessages: (id) => apiRequest(`/conversations/${id}/messages`),
-    sendMessage: (id, content) => apiRequest(`/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ content }) }),
+    markRead: (id) => apiRequest(`/conversations/${id}/read`, { method: 'POST' }),
+    sendMessage: (id, data) => apiRequest(`/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify(data) }),
+    editMessage: (conversationId, messageId, content) =>
+      apiRequest(`/conversations/${conversationId}/messages/${messageId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ content }),
+      }),
+    deleteMessage: (conversationId, messageId) =>
+      apiRequest(`/conversations/${conversationId}/messages/${messageId}`, {
+        method: 'DELETE',
+      }),
   },
 };

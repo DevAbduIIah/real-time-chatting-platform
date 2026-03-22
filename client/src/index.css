@@ -1,5 +1,98 @@
 @import "tailwindcss";
 
+:root {
+  color-scheme: light;
+  --app-bg: #f1f5f9;
+  --surface-primary: rgba(255, 255, 255, 0.95);
+  --surface-secondary: #f8fafc;
+  --surface-elevated: #ffffff;
+  --border-subtle: rgba(148, 163, 184, 0.22);
+  --text-primary: #0f172a;
+  --text-muted: #64748b;
+  --gradient-start: rgba(99, 102, 241, 0.18);
+  --gradient-end: rgba(14, 165, 233, 0.14);
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+  --app-bg: #0f172a;
+  --surface-primary: rgba(15, 23, 42, 0.92);
+  --surface-secondary: #172033;
+  --surface-elevated: #111827;
+  --border-subtle: rgba(148, 163, 184, 0.2);
+  --text-primary: #e2e8f0;
+  --text-muted: #94a3b8;
+  --gradient-start: rgba(37, 99, 235, 0.28);
+  --gradient-end: rgba(14, 165, 233, 0.18);
+}
+
+body {
+  background: var(--app-bg);
+  color: var(--text-primary);
+}
+
+.theme-gradient-page {
+  background:
+    radial-gradient(circle at top left, var(--gradient-start), transparent 40%),
+    radial-gradient(circle at bottom right, var(--gradient-end), transparent 35%),
+    var(--app-bg);
+}
+
+.theme-surface {
+  background: var(--surface-primary);
+}
+
+.theme-surface-muted {
+  background: var(--surface-secondary);
+}
+
+.theme-card {
+  background: var(--surface-elevated);
+}
+
+.theme-border {
+  border-color: var(--border-subtle);
+}
+
+.theme-text {
+  color: var(--text-primary);
+}
+
+.theme-muted {
+  color: var(--text-muted);
+}
+
+.theme-input {
+  background: var(--surface-secondary);
+  border: 1px solid transparent;
+  color: var(--text-primary);
+}
+
+.theme-input::placeholder {
+  color: var(--text-muted);
+}
+
+.theme-input:focus {
+  border-color: rgba(99, 102, 241, 0.25);
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.12);
+}
+
+.theme-skeleton {
+  background: rgba(148, 163, 184, 0.22);
+}
+
+.theme-skeleton-soft {
+  background: rgba(148, 163, 184, 0.14);
+}
+
+[data-theme='dark'] .theme-skeleton {
+  background: rgba(148, 163, 184, 0.18);
+}
+
+[data-theme='dark'] .theme-skeleton-soft {
+  background: rgba(148, 163, 184, 0.12);
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;

@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js"
+    "prisma:generate": "prisma generate",
+    "start": "npm run prisma:generate && node index.js",
+    "dev": "npm run prisma:generate && node --watch index.js"
   },
   "keywords": [],
   "author": "",
@@ -19,6 +20,7 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
     "prisma": "^7.5.0",
     "socket.io": "^4.8.3"
   }

@@ -1,24 +1,156 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
 import { api } from '../lib/api';
+import { createPendingMessage, updateMessageById, upsertMessage } from '../lib/message-utils';
 import Sidebar from '../components/Sidebar';
 import ChatHeader from '../components/ChatHeader';
 import MessageList from '../components/MessageList';
 import MessageInput from '../components/MessageInput';
+import EmptyState from '../components/EmptyState';
+
+function sortConversationsByActivity(conversationList) {
+  return [...conversationList].sort((a, b) => {
+    const aDate = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
+    const bDate = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
+
+    if (aDate !== bDate) {
+      return bDate - aDate;
+    }
+
+    return a.otherUser.name.localeCompare(b.otherUser.name);
+  });
+}
+
+function isMobileViewport() {
+  return typeof window !== 'undefined' ? window.innerWidth < 1024 : false;
+}
+
+function buildConversationPreview(message, currentUserId) {
+  return {
+    id: message.id,
+    content: message.deletedAt
+      ? message.senderId === currentUserId
+        ? 'You deleted a message'
+        : 'Message deleted'
+      : message.content,
+    createdAt: message.createdAt,
+    isOwn: message.senderId === currentUserId,
+  };
+}
 
 function Chat() {
   const { user, logout } = useAuth();
   const { socket, isConnected, sendMessage, sendTyping, sendStopTyping } = useSocket();
   const [users, setUsers] = useState([]);
   const [conversations, setConversations] = useState([]);
-  const [selectedConversation, setSelectedConversation] = useState(null);
+  const [selectedConversationId, setSelectedConversationId] = useState(null);
   const [messages, setMessages] = useState([]);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [loading, setLoading] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => !isMobileViewport());
+  const [isSidebarLoading, setIsSidebarLoading] = useState(true);
+  const [isMessagesLoading, setIsMessagesLoading] = useState(false);
   const [isOtherUserTyping, setIsOtherUserTyping] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [replyToMessage, setReplyToMessage] = useState(null);
+  const [editingMessageId, setEditingMessageId] = useState(null);
+  const pendingTimeoutsRef = useRef(new Map());
 
-  // Fetch users and conversations on mount
+  const selectedConversation = useMemo(
+    () =>
+      conversations.find((conversation) => conversation.id === selectedConversationId) || null,
+    [conversations, selectedConversationId]
+  );
+
+  const editingMessage = useMemo(
+    () => messages.find((message) => message.id === editingMessageId) || null,
+    [editingMessageId, messages]
+  );
+
+  const clearPendingTimeout = useCallback((clientTempId) => {
+    if (!clientTempId) return;
+
+    const timeoutId = pendingTimeoutsRef.current.get(clientTempId);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      pendingTimeoutsRef.current.delete(clientTempId);
+    }
+  }, []);
+
+  const updateConversationSummary = useCallback((conversationId, updater) => {
+    setConversations((prev) =>
+      sortConversationsByActivity(
+        prev.map((conversation) =>
+          conversation.id === conversationId
+            ? updater(conversation)
+            : conversation
+        )
+      )
+    );
+  }, []);
+
+  const applyConversationMessage = useCallback((message, unreadMode = 'keep') => {
+    updateConversationSummary(message.conversationId, (conversation) => ({
+      ...conversation,
+      lastMessage: buildConversationPreview(message, user.id),
+      lastActivityAt: message.createdAt,
+      updatedAt: message.createdAt,
+      unreadCount:
+        unreadMode === 'increment'
+          ? (conversation.unreadCount || 0) + 1
+          : unreadMode === 'zero'
+            ? 0
+            : conversation.unreadCount || 0,
+    }));
+  }, [updateConversationSummary, user.id]);
+
+  const syncConversationRead = useCallback(async (conversationId) => {
+    if (!conversationId) return;
+
+    setConversations((prev) =>
+      prev.map((conversation) =>
+        conversation.id === conversationId
+          ? { ...conversation, unreadCount: 0 }
+          : conversation
+      )
+    );
+
+    try {
+      await api.conversations.markRead(conversationId);
+    } catch (err) {
+      console.error('Error marking conversation as read:', err);
+    }
+  }, []);
+
+  const markMessageFailed = useCallback((clientTempId) => {
+    setMessages((prev) =>
+      prev.map((message) =>
+        message.clientTempId === clientTempId && message.status === 'pending'
+          ? { ...message, status: 'failed' }
+          : message
+      )
+    );
+  }, []);
+
+  const schedulePendingTimeout = useCallback((clientTempId) => {
+    clearPendingTimeout(clientTempId);
+
+    const timeoutId = setTimeout(() => {
+      markMessageFailed(clientTempId);
+      pendingTimeoutsRef.current.delete(clientTempId);
+    }, 10000);
+
+    pendingTimeoutsRef.current.set(clientTempId, timeoutId);
+  }, [clearPendingTimeout, markMessageFailed]);
+
+  useEffect(() => {
+    const pendingTimeouts = pendingTimeoutsRef.current;
+
+    return () => {
+      pendingTimeouts.forEach((timeoutId) => clearTimeout(timeoutId));
+      pendingTimeouts.clear();
+    };
+  }, []);
+
   useEffect(() => {
     const fetchData = async () => {
       try {
@@ -26,265 +158,475 @@ function Chat() {
           api.users.getAll(),
           api.conversations.getAll(),
         ]);
+
         setUsers(usersData.users);
-        setConversations(conversationsData.conversations);
+        setConversations(sortConversationsByActivity(conversationsData.conversations));
       } catch (err) {
         console.error('Error fetching data:', err);
       } finally {
-        setLoading(false);
+        setIsSidebarLoading(false);
       }
     };
 
     fetchData();
   }, []);
 
-  // Fetch messages when conversation changes
   useEffect(() => {
-    if (!selectedConversation) {
+    setReplyToMessage(null);
+    setEditingMessageId(null);
+    setIsOtherUserTyping(false);
+  }, [selectedConversationId]);
+
+  useEffect(() => {
+    if (!selectedConversationId) {
       setMessages([]);
+      setIsMessagesLoading(false);
       return;
     }
 
     const fetchMessages = async () => {
+      setIsMessagesLoading(true);
+
       try {
-        const data = await api.conversations.getMessages(selectedConversation.id);
+        const data = await api.conversations.getMessages(selectedConversationId);
         setMessages(data.messages);
+        setConversations((prev) =>
+          prev.map((conversation) =>
+            conversation.id === selectedConversationId
+              ? { ...conversation, unreadCount: 0 }
+              : conversation
+          )
+        );
       } catch (err) {
         console.error('Error fetching messages:', err);
+      } finally {
+        setIsMessagesLoading(false);
       }
     };
 
     fetchMessages();
-  }, [selectedConversation?.id]);
+  }, [selectedConversationId]);
 
-  // Listen for real-time messages via socket
   useEffect(() => {
     if (!socket || !isConnected) return;
 
     const handleNewMessage = (message) => {
-      // Add message to the list if it belongs to current conversation
-      if (selectedConversation && message.conversationId === selectedConversation.id) {
-        setMessages((prev) => [...prev, message]);
+      const isActiveConversation = selectedConversationId === message.conversationId;
+
+      if (isActiveConversation) {
+        setMessages((prev) => upsertMessage(prev, message));
       }
 
-      // Update conversation's last message
-      setConversations((prev) =>
-        prev.map((conv) =>
-          conv.id === message.conversationId
-            ? {
-                ...conv,
-                lastMessage: {
-                  content: message.content,
-                  createdAt: message.createdAt,
-                  isOwn: message.senderId === user.id,
-                },
-                updatedAt: message.createdAt,
-              }
-            : conv
+      if (isActiveConversation && !message.isOwn) {
+        setIsOtherUserTyping(false);
+        void syncConversationRead(message.conversationId);
+      }
+
+      applyConversationMessage(
+        message,
+        message.isOwn || isActiveConversation ? 'zero' : 'increment'
+      );
+    };
+
+    const handleMessageAck = ({ clientTempId, message }) => {
+      clearPendingTimeout(clientTempId);
+      setMessages((prev) => upsertMessage(prev, message));
+      applyConversationMessage(message, 'zero');
+    };
+
+    const handleMessageError = ({ clientTempId }) => {
+      clearPendingTimeout(clientTempId);
+      if (!clientTempId) return;
+
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.clientTempId === clientTempId
+            ? { ...message, status: 'failed' }
+            : message
         )
       );
     };
 
-    socket.on('new_message', handleNewMessage);
+    const handleMessageUpdated = (message) => {
+      setMessages((prev) => upsertMessage(prev, message));
+    };
 
-    // Handle typing indicators
+    const handleMessageDeleted = (message) => {
+      setMessages((prev) => upsertMessage(prev, message));
+    };
+
+    const handleMessagesSeen = ({ messageIds, readAt }) => {
+      const messageIdSet = new Set(messageIds);
+
+      setMessages((prev) =>
+        prev.map((message) =>
+          messageIdSet.has(message.id)
+            ? { ...message, readAt, status: 'seen' }
+            : message
+        )
+      );
+    };
+
+    const handleConversationUpdated = ({ conversationId, lastMessage, lastActivityAt }) => {
+      updateConversationSummary(conversationId, (conversation) => ({
+        ...conversation,
+        lastMessage,
+        lastActivityAt,
+        updatedAt: lastActivityAt,
+      }));
+    };
+
     const handleUserTyping = (data) => {
-      if (selectedConversation && data.conversationId === selectedConversation.id) {
+      if (selectedConversationId && data.conversationId === selectedConversationId) {
         setIsOtherUserTyping(true);
       }
     };
 
     const handleUserStopTyping = (data) => {
-      if (selectedConversation && data.conversationId === selectedConversation.id) {
+      if (selectedConversationId && data.conversationId === selectedConversationId) {
         setIsOtherUserTyping(false);
       }
     };
 
+    socket.on('new_message', handleNewMessage);
+    socket.on('message_ack', handleMessageAck);
+    socket.on('message_error', handleMessageError);
+    socket.on('message_updated', handleMessageUpdated);
+    socket.on('message_deleted', handleMessageDeleted);
+    socket.on('messages_seen', handleMessagesSeen);
+    socket.on('conversation_updated', handleConversationUpdated);
     socket.on('user_typing', handleUserTyping);
     socket.on('user_stop_typing', handleUserStopTyping);
 
     return () => {
       socket.off('new_message', handleNewMessage);
+      socket.off('message_ack', handleMessageAck);
+      socket.off('message_error', handleMessageError);
+      socket.off('message_updated', handleMessageUpdated);
+      socket.off('message_deleted', handleMessageDeleted);
+      socket.off('messages_seen', handleMessagesSeen);
+      socket.off('conversation_updated', handleConversationUpdated);
       socket.off('user_typing', handleUserTyping);
       socket.off('user_stop_typing', handleUserStopTyping);
     };
-  }, [socket, isConnected, selectedConversation, user]);
+  }, [
+    applyConversationMessage,
+    clearPendingTimeout,
+    isConnected,
+    selectedConversationId,
+    socket,
+    syncConversationRead,
+    updateConversationSummary,
+  ]);
 
-  // Reset typing indicator when conversation changes
-  useEffect(() => {
-    setIsOtherUserTyping(false);
-  }, [selectedConversation?.id]);
-
-  // Handle typing indicator
   const handleTyping = useCallback(() => {
-    if (selectedConversation && socket && isConnected) {
+    if (selectedConversation && isConnected) {
       sendTyping(selectedConversation.id, selectedConversation.otherUser.id);
     }
-  }, [selectedConversation, socket, isConnected, sendTyping]);
+  }, [selectedConversation, isConnected, sendTyping]);
 
   const handleStopTyping = useCallback(() => {
-    if (selectedConversation && socket && isConnected) {
+    if (selectedConversation && isConnected) {
       sendStopTyping(selectedConversation.id, selectedConversation.otherUser.id);
     }
-  }, [selectedConversation, socket, isConnected, sendStopTyping]);
+  }, [selectedConversation, isConnected, sendStopTyping]);
 
-  // Handle selecting a user (create or open conversation)
   const handleSelectUser = async (selectedUser) => {
     try {
-      // Check if conversation already exists
-      const existingConv = conversations.find(
-        (conv) => conv.otherUser.id === selectedUser.id
+      const existingConversation = conversations.find(
+        (conversation) => conversation.otherUser.id === selectedUser.id
       );
 
-      if (existingConv) {
-        setSelectedConversation(existingConv);
+      if (existingConversation) {
+        setConversations((prev) =>
+          prev.map((conversation) =>
+            conversation.id === existingConversation.id
+              ? { ...conversation, unreadCount: 0 }
+              : conversation
+          )
+        );
+        setSelectedConversationId(existingConversation.id);
       } else {
-        // Create new conversation
         const data = await api.conversations.create(selectedUser.id);
-        const newConv = {
-          id: data.conversation.id,
-          otherUser: data.conversation.otherUser,
-          lastMessage: null,
-        };
-        setConversations((prev) => [newConv, ...prev]);
-        setSelectedConversation(newConv);
+        setConversations((prev) =>
+          sortConversationsByActivity([data.conversation, ...prev])
+        );
+        setSelectedConversationId(data.conversation.id);
+      }
+
+      if (isMobileViewport()) {
+        setIsSidebarOpen(false);
       }
     } catch (err) {
       console.error('Error selecting user:', err);
     }
   };
 
-  // Handle sending a message
-  const handleSendMessage = async (content) => {
-    if (!selectedConversation) return;
+  const sendNewMessage = useCallback(async ({ content, replyMessage, existingFailedMessage = null }) => {
+    if (!selectedConversation) {
+      return;
+    }
 
-    // Use socket for real-time messaging
+    const trimmedContent = content.trim();
+    if (!trimmedContent) {
+      return;
+    }
+
+    const pendingMessage = existingFailedMessage
+      ? {
+          ...existingFailedMessage,
+          content: trimmedContent,
+          status: 'pending',
+        }
+      : createPendingMessage({
+          content: trimmedContent,
+          conversationId: selectedConversation.id,
+          user,
+          replyToMessage: replyMessage,
+        });
+
+    setMessages((prev) =>
+      existingFailedMessage
+        ? updateMessageById(prev, existingFailedMessage.id, () => pendingMessage)
+        : upsertMessage(prev, pendingMessage)
+    );
+    applyConversationMessage(pendingMessage, 'zero');
+    schedulePendingTimeout(pendingMessage.clientTempId);
+
+    const payload = {
+      content: trimmedContent,
+      clientTempId: pendingMessage.clientTempId,
+      replyToMessageId: replyMessage?.id || null,
+    };
+
+    setReplyToMessage(null);
+
     if (socket && isConnected) {
-      sendMessage(selectedConversation.id, content);
-    } else {
-      // Fallback to API if socket not connected
-      try {
-        const data = await api.conversations.sendMessage(selectedConversation.id, content);
-        setMessages((prev) => [...prev, data.message]);
+      sendMessage({
+        conversationId: selectedConversation.id,
+        ...payload,
+      });
+      return;
+    }
 
-        // Update conversation's last message
-        setConversations((prev) =>
-          prev.map((conv) =>
-            conv.id === selectedConversation.id
-              ? {
-                  ...conv,
-                  lastMessage: {
-                    content: data.message.content,
-                    createdAt: data.message.createdAt,
-                    isOwn: true,
-                  },
-                }
-              : conv
-          )
+    try {
+      const data = await api.conversations.sendMessage(selectedConversation.id, payload);
+      clearPendingTimeout(pendingMessage.clientTempId);
+      setMessages((prev) => upsertMessage(prev, data.message));
+      applyConversationMessage(data.message, 'zero');
+    } catch (err) {
+      clearPendingTimeout(pendingMessage.clientTempId);
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.clientTempId === pendingMessage.clientTempId
+            ? { ...message, status: 'failed' }
+            : message
+        )
+      );
+      console.error('Error sending message:', err);
+    }
+  }, [
+    applyConversationMessage,
+    clearPendingTimeout,
+    isConnected,
+    schedulePendingTimeout,
+    selectedConversation,
+    sendMessage,
+    socket,
+    user,
+  ]);
+
+  const handleSubmitMessage = async (content) => {
+    if (editingMessage) {
+      try {
+        const data = await api.conversations.editMessage(
+          selectedConversation.id,
+          editingMessage.id,
+          content.trim()
         );
+        setMessages((prev) => upsertMessage(prev, data.message));
+
+        if (selectedConversation.lastMessage?.id === data.message.id) {
+          applyConversationMessage(data.message, 'keep');
+        }
+
+        setEditingMessageId(null);
       } catch (err) {
-        console.error('Error sending message:', err);
+        console.error('Error editing message:', err);
       }
+
+      return;
+    }
+
+    await sendNewMessage({
+      content,
+      replyMessage: replyToMessage,
+    });
+  };
+
+  const handleReplyMessage = (message) => {
+    setEditingMessageId(null);
+    setReplyToMessage(message);
+  };
+
+  const handleEditMessage = (message) => {
+    setReplyToMessage(null);
+    setEditingMessageId(message.id);
+  };
+
+  const handleDeleteMessage = async (message) => {
+    if (!selectedConversation) {
+      return;
+    }
+
+    try {
+      const data = await api.conversations.deleteMessage(selectedConversation.id, message.id);
+      setMessages((prev) => upsertMessage(prev, data.message));
+
+      if (selectedConversation.lastMessage?.id === data.message.id) {
+        applyConversationMessage(data.message, 'keep');
+      }
+
+      if (editingMessageId === message.id) {
+        setEditingMessageId(null);
+      }
+
+      if (replyToMessage?.id === message.id) {
+        setReplyToMessage(null);
+      }
+    } catch (err) {
+      console.error('Error deleting message:', err);
     }
   };
 
-  // Combine users and conversations for sidebar
-  const getSidebarItems = () => {
-    // Create a map of users with conversations
-    const userConvMap = new Map();
+  const handleRetryMessage = async (message) => {
+    await sendNewMessage({
+      content: message.content,
+      replyMessage: message.replyToMessage,
+      existingFailedMessage: message,
+    });
+  };
 
-    conversations.forEach((conv) => {
-      userConvMap.set(conv.otherUser.id, {
-        ...conv.otherUser,
-        conversationId: conv.id,
-        lastMessage: conv.lastMessage?.content || null,
-        lastMessageTime: conv.lastMessage?.createdAt || conv.updatedAt,
+  const sidebarItems = useMemo(() => {
+    const userConversationMap = new Map();
+
+    conversations.forEach((conversation) => {
+      userConversationMap.set(conversation.otherUser.id, {
+        ...conversation.otherUser,
+        conversationId: conversation.id,
+        lastMessage: conversation.lastMessage?.content || null,
+        lastMessageIsOwn: conversation.lastMessage?.isOwn || false,
+        lastActivityAt: conversation.lastActivityAt || conversation.updatedAt,
+        unreadCount: conversation.unreadCount || 0,
         hasConversation: true,
       });
     });
 
-    // Add users without conversations
-    users.forEach((u) => {
-      if (!userConvMap.has(u.id)) {
-        userConvMap.set(u.id, {
-          ...u,
+    users.forEach((listedUser) => {
+      if (!userConversationMap.has(listedUser.id)) {
+        userConversationMap.set(listedUser.id, {
+          ...listedUser,
           conversationId: null,
           lastMessage: null,
-          lastMessageTime: null,
+          lastMessageIsOwn: false,
+          lastActivityAt: null,
+          unreadCount: 0,
           hasConversation: false,
         });
       }
     });
 
-    return Array.from(userConvMap.values()).sort((a, b) => {
-      // Sort by last message time (conversations first, then users)
-      if (a.lastMessageTime && b.lastMessageTime) {
-        return new Date(b.lastMessageTime) - new Date(a.lastMessageTime);
-      }
-      if (a.lastMessageTime) return -1;
-      if (b.lastMessageTime) return 1;
-      return a.name.localeCompare(b.name);
-    });
-  };
+    const normalizedQuery = searchQuery.trim().toLowerCase();
 
-  if (loading) {
-    return (
-      <div className="h-screen flex items-center justify-center bg-gray-100">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
-          <p className="text-gray-500">Loading...</p>
-        </div>
-      </div>
-    );
-  }
+    return Array.from(userConversationMap.values())
+      .filter((item) => {
+        if (!normalizedQuery) return true;
+
+        const searchableText = [item.name, item.email, item.lastMessage]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+
+        return searchableText.includes(normalizedQuery);
+      })
+      .sort((a, b) => {
+        const aDate = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
+        const bDate = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
+
+        if (aDate !== bDate) {
+          return bDate - aDate;
+        }
+
+        if (a.hasConversation !== b.hasConversation) {
+          return a.hasConversation ? -1 : 1;
+        }
+
+        return a.name.localeCompare(b.name);
+      });
+  }, [conversations, searchQuery, users]);
 
   return (
-    <div className="h-screen flex bg-gray-100">
-      {/* Connection status indicator */}
+    <div className="theme-gradient-page flex h-screen">
       {!isConnected && user && (
-        <div className="fixed top-0 left-0 right-0 z-50 bg-yellow-500 text-white px-4 py-2 text-center text-sm">
+        <div className="fixed left-0 right-0 top-0 z-50 bg-amber-500 px-4 py-2 text-center text-sm text-white">
           Reconnecting to server...
         </div>
       )}
 
-      {/* Sidebar */}
       <Sidebar
-        users={getSidebarItems()}
-        selectedUser={selectedConversation?.otherUser || null}
+        users={sidebarItems}
+        selectedUserId={selectedConversation?.otherUser?.id || null}
         onSelectUser={handleSelectUser}
         isOpen={isSidebarOpen}
-        onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
+        onToggle={() => setIsSidebarOpen((prev) => !prev)}
         currentUser={user}
         onLogout={logout}
+        isLoading={isSidebarLoading}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
       />
 
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className={`min-w-0 flex-1 flex-col ${isSidebarOpen ? 'hidden lg:flex' : 'flex'}`}>
         {selectedConversation ? (
           <>
             <ChatHeader
               user={selectedConversation.otherUser}
-              onMenuClick={() => setIsSidebarOpen(!isSidebarOpen)}
+              onMenuClick={() => setIsSidebarOpen((prev) => !prev)}
               isTyping={isOtherUserTyping}
             />
-            <MessageList messages={messages} isTyping={isOtherUserTyping} />
+            <MessageList
+              messages={messages}
+              isTyping={isOtherUserTyping}
+              isLoading={isMessagesLoading}
+              activeConversationId={selectedConversationId}
+              onReply={handleReplyMessage}
+              onEdit={handleEditMessage}
+              onDelete={handleDeleteMessage}
+              onRetry={handleRetryMessage}
+            />
             <MessageInput
-              onSend={handleSendMessage}
+              key={`composer-${selectedConversationId}-${editingMessage?.id || 'new'}`}
+              conversationId={selectedConversationId}
+              onSend={handleSubmitMessage}
               onTyping={handleTyping}
               onStopTyping={handleStopTyping}
+              replyToMessage={replyToMessage}
+              editingMessage={editingMessage}
+              onCancelReply={() => setReplyToMessage(null)}
+              onCancelEdit={() => setEditingMessageId(null)}
             />
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center bg-gray-50">
-            <div className="text-center">
-              <div className="w-16 h-16 bg-gray-200 rounded-full flex items-center justify-center mx-auto mb-4">
-                <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="theme-surface-muted flex-1">
+            <EmptyState
+              title="Select a conversation"
+              description="Choose someone from the sidebar to start chatting, catch up, or continue where you left off."
+              icon={(
+                <svg className="h-8 w-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                 </svg>
-              </div>
-              <h3 className="text-lg font-medium text-gray-900 mb-1">Select a conversation</h3>
-              <p className="text-gray-500">Choose a user from the sidebar to start chatting</p>
-            </div>
+              )}
+            />
           </div>
         )}
       </div>
